@@ -45,6 +45,9 @@ pub struct DetectionConfig {
 
     pub transfer_enabled: bool,
     pub transfer_thresholds: Vec<TransferThreshold>,
+    /// Any single transfer worth at least this many USD (priced by Blur,
+    /// liquid tokens only). `None` disables the USD check.
+    pub transfer_usd_threshold: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +90,7 @@ impl Default for DetectionConfig {
                     amount: 100_000.0,
                 },
             ],
+            transfer_usd_threshold: Some(250_000.0),
         }
     }
 }
@@ -226,6 +230,10 @@ pub enum Condition {
         mint: Option<String>,
         min_amount: f64,
     },
+    /// Any single transfer worth at least `min_usd`, priced by Solami Blur.
+    TransferUsd {
+        min_usd: f64,
+    },
     Incident {
         /// Empty = any kind.
         kinds: Vec<IncidentKind>,
@@ -329,4 +337,5 @@ pub struct TxSummary {
 pub struct LargestTransfer {
     pub amount: f64,
     pub symbol: String,
+    pub usd: Option<f64>,
 }

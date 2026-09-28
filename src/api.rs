@@ -62,6 +62,7 @@ pub fn router(sentinel: AppState) -> Router {
 async fn status(State(s): State<AppState>) -> ApiResult<Value> {
     Ok(Json(json!({
         "stream": s.stream_health(),
+        "pricing": s.prices.status(),
         "programs": s.programs(),
         "now": Utc::now(),
     })))
@@ -171,7 +172,7 @@ async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> 
         )
     })?;
     let labels = s.program_labels();
-    let trace = trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners).await;
+    let trace = trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices).await;
     let programs: Vec<&String> = labels.keys().filter(|p| tx.touches(p)).collect();
     Ok(Json(json!({
         "transaction": tx,

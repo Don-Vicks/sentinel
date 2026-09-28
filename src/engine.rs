@@ -9,6 +9,7 @@ use crate::live::{ErrorCount, IncidentChange, LiveEvent, ProgramSnapshot, Stream
 use crate::metrics::Window;
 use crate::model::*;
 use crate::source::VortexSource;
+use crate::pricing::PriceBook;
 use crate::store::Store;
 use crate::trace::{program_label, OwnerCache};
 use anyhow::{bail, Result};
@@ -34,6 +35,7 @@ pub struct Sentinel {
     pub source: Arc<dyn VortexSource>,
     pub rpc: Option<Arc<RpcClient>>,
     pub owners: OwnerCache,
+    pub prices: Arc<PriceBook>,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
     dispatcher: Dispatcher,
@@ -110,6 +112,7 @@ impl Sentinel {
         store: Arc<Store>,
         source: Arc<dyn VortexSource>,
         rpc: Option<Arc<RpcClient>>,
+        prices: Arc<PriceBook>,
         public_url: String,
     ) -> Result<Arc<Self>> {
         let (live, _) = broadcast::channel(4096);
@@ -136,6 +139,7 @@ impl Sentinel {
             source,
             rpc,
             owners: OwnerCache::default(),
+            prices,
             live,
             public_url,
             dispatcher,
@@ -199,12 +203,19 @@ impl Sentinel {
 
         let mut alerts = Vec::new();
         let rules = state.rules.clone();
+        let mut noted = false;
         for ps in state.programs.values_mut() {
             let pid = ps.program.program_id.clone();
             if !tx.touches(&pid) {
                 continue;
             }
-            let summary = summarize(&tx, &pid);
+            if !noted {
+                for t in &tx.transfers {
+                    self.prices.note(t.mint.as_deref());
+                }
+                noted = true;
+            }
+            let summary = summarize(&tx, &pid, &self.prices);
             let fp = fingerprint(&tx);
             if let Some(fp) = &fp {
                 ps.fingerprints.entry(fp.key()).or_insert_with(|| fp.clone());
@@ -230,8 +241,8 @@ impl Sentinel {
             }
 
             if ps.program.detection.transfer_enabled {
-                if let Some((amount, symbol, threshold)) = large_transfer(&tx, &ps.program.detection) {
-                    self.large_transfer_incident(ps, &tx, &summary, amount, &symbol, threshold, second);
+                if let Some(big) = large_transfer(&tx, &ps.program.detection, &self.prices) {
+                    self.large_transfer_incident(ps, &tx, &summary, big, second);
                 }
             }
             for rule in rules.iter().filter(|r| applies(r, &pid)) {
@@ -252,6 +263,29 @@ impl Sentinel {
                             symbol_for(mint.as_deref())
                         );
                         alerts.extend(self.fire_rule(ps, rule, msg, t.amount, LinkFilter::Manual, true, second, Some((&tx, &summary))));
+                    }
+                }
+                if let Condition::TransferUsd { min_usd } = &rule.condition {
+                    let best = tx
+                        .transfers
+                        .iter()
+                        .filter(|t| matches!(t.kind, TransferKind::Sol | TransferKind::Token))
+                        .filter_map(|t| {
+                            let p = self.prices.get(t.mint.as_deref()).filter(|p| p.trusted())?;
+                            Some((t, p.usd * t.amount))
+                        })
+                        .filter(|(_, usd)| usd >= min_usd)
+                        .max_by(|a, b| a.1.total_cmp(&b.1));
+                    if let Some((t, usd)) = best {
+                        let msg = format!(
+                            "{} {} (${}) moved in {} (rule: ≥ ${})",
+                            fmt_amount(t.amount),
+                            symbol_for(t.mint.as_deref()),
+                            fmt_amount(usd),
+                            short_sig(&tx.signature),
+                            fmt_amount(*min_usd)
+                        );
+                        alerts.extend(self.fire_rule(ps, rule, msg, usd, LinkFilter::Manual, true, second, Some((&tx, &summary))));
                     }
                 }
             }
@@ -565,32 +599,30 @@ impl Sentinel {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn large_transfer_incident(
         &self,
         ps: &mut ProgramState,
         tx: &Arc<VortexTransaction>,
         summary: &TxSummary,
-        amount: f64,
-        symbol: &str,
-        threshold: f64,
+        big: LargeMove,
         second: i64,
     ) {
         let key = IncidentKind::LargeTransfer.as_str();
+        let value = big.usd.unwrap_or(big.amount);
         if let Some(open) = ps.open.get_mut(key) {
             link_tx(&self.store, open, tx, summary, second);
             open.last_event = second;
-            if open.incident.peak.is_none_or(|p| amount > p) {
-                open.incident.peak = Some(amount);
+            if open.incident.peak.is_none_or(|p| value > p) {
+                open.incident.peak = Some(value);
             }
             return;
         }
-        let multiple = amount / threshold;
-        let severity = match multiple {
+        let severity = match big.multiple {
             m if m >= 10.0 => Severity::High,
             m if m >= 3.0 => Severity::Medium,
             _ => Severity::Low,
         };
+        let usd_note = big.usd.map(|u| format!(" (${})", fmt_amount(u))).unwrap_or_default();
         let incident = Incident {
             id: 0,
             program_id: ps.program.program_id.clone(),
@@ -598,21 +630,28 @@ impl Sentinel {
             severity,
             status: IncidentStatus::Open,
             title: format!("Large transfer · {}", ps.program.label),
-            summary: format!("{} {symbol} moved in one transaction", fmt_amount(amount)),
+            summary: format!("{} {}{usd_note} moved in one transaction", fmt_amount(big.amount), big.symbol),
             explanation: format!(
-                "Transaction {} moved {:.4} {symbol}, above the {} {symbol} threshold ({multiple:.1}×). \
+                "Transaction {} moved {:.4} {}{usd_note}, above the {} threshold ({:.1}×). {}\
                  Further large transfers within {} min are grouped here.",
                 short_sig(&tx.signature),
-                amount,
-                fmt_amount(threshold),
+                big.amount,
+                big.symbol,
+                big.threshold_label,
+                big.multiple,
+                if big.usd_basis {
+                    "USD value uses the Solami Blur last-trade price; tokens under $10K liquidity are not valued for alerts. "
+                } else {
+                    ""
+                },
                 EVENT_INCIDENT_QUIET_SECS / 60
             ),
             source: "detector".into(),
-            metric: Some("transfer_amount".into()),
-            observed: Some(amount),
-            peak: Some(amount),
+            metric: Some(if big.usd_basis { "transfer_usd" } else { "transfer_amount" }.into()),
+            observed: Some(value),
+            peak: Some(value),
             baseline: None,
-            threshold: Some(threshold),
+            threshold: Some(big.threshold),
             onset_at: Some(tx.received_at),
             detected_at: Utc::now(),
             updated_at: Utc::now(),
@@ -670,6 +709,7 @@ impl Sentinel {
             let (threshold, window) = match &rule.condition {
                 Condition::Metric { value, window_secs, .. } => (Some(*value), *window_secs as i64),
                 Condition::Transfer { min_amount, .. } => (Some(*min_amount), 60),
+                Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
                 Condition::Incident { .. } => (None, 60),
             };
             let incident = Incident {
@@ -795,6 +835,7 @@ impl Sentinel {
             dropped: state.dropped,
             programs_streamed: hub.programs,
             uptime_secs: (Utc::now() - hub.started_at).num_seconds(),
+            pricing: self.prices.status(),
         }
     }
 
@@ -1111,23 +1152,69 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
     }
 }
 
-fn large_transfer(tx: &VortexTransaction, cfg: &DetectionConfig) -> Option<(f64, String, f64)> {
+/// The most significant transfer over a threshold, by multiple of it.
+struct LargeMove {
+    amount: f64,
+    symbol: String,
+    usd: Option<f64>,
+    threshold: f64,
+    threshold_label: String,
+    multiple: f64,
+    usd_basis: bool,
+}
+
+fn large_transfer(tx: &VortexTransaction, cfg: &DetectionConfig, prices: &PriceBook) -> Option<LargeMove> {
     if !tx.success {
         return None;
     }
-    tx.transfers
+    let mut best: Option<LargeMove> = None;
+    for t in tx
+        .transfers
         .iter()
         .filter(|t| matches!(t.kind, TransferKind::Sol | TransferKind::Token))
-        .filter_map(|t| {
-            let th = cfg.transfer_thresholds.iter().find(|th| match (&th.mint, &t.mint) {
-                (None, None) => true,
-                (None, Some(m)) => m == "So11111111111111111111111111111111111111112",
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            })?;
-            (t.amount >= th.amount).then(|| (t.amount, symbol_for(th.mint.as_deref()), th.amount))
-        })
-        .max_by(|a, b| a.0.total_cmp(&b.0))
+    {
+        let symbol = symbol_for(t.mint.as_deref());
+        let price = prices.get(t.mint.as_deref());
+        let usd = price.map(|p| p.usd * t.amount);
+        let by_amount = cfg.transfer_thresholds.iter().find(|th| match (&th.mint, &t.mint) {
+            (None, None) => true,
+            (None, Some(m)) => m == crate::pricing::WSOL,
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        });
+        let mut candidates = Vec::new();
+        if let Some(th) = by_amount.filter(|th| t.amount >= th.amount) {
+            candidates.push(LargeMove {
+                amount: t.amount,
+                symbol: symbol.clone(),
+                usd,
+                threshold: th.amount,
+                threshold_label: format!("{} {}", fmt_amount(th.amount), symbol_for(th.mint.as_deref())),
+                multiple: t.amount / th.amount,
+                usd_basis: false,
+            });
+        }
+        if let (Some(th), Some(p)) = (cfg.transfer_usd_threshold, price.filter(|p| p.trusted())) {
+            let value = p.usd * t.amount;
+            if value >= th {
+                candidates.push(LargeMove {
+                    amount: t.amount,
+                    symbol: symbol.clone(),
+                    usd: Some(value),
+                    threshold: th,
+                    threshold_label: format!("${}", fmt_amount(th)),
+                    multiple: value / th,
+                    usd_basis: true,
+                });
+            }
+        }
+        for c in candidates {
+            if best.as_ref().is_none_or(|b| c.multiple > b.multiple) {
+                best = Some(c);
+            }
+        }
+    }
+    best
 }
 
 fn short_sig(sig: &str) -> String {

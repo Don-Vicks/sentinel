@@ -18,6 +18,19 @@ export function compact(x: number | null | undefined) {
   return x.toPrecision(3);
 }
 
+/** USD with sensible precision; `null` when unpriced. */
+export function usd(x: number | null | undefined) {
+  if (x === null || x === undefined || !Number.isFinite(x)) return null;
+  const a = Math.abs(x);
+  const sign = x < 0 ? '-' : '';
+  if (a >= 1e9) return `${sign}$${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${sign}$${(a / 1e6).toFixed(2)}M`;
+  if (a >= 1e4) return `${sign}$${(a / 1e3).toFixed(1)}K`;
+  if (a >= 1) return `${sign}$${a.toFixed(2)}`;
+  if (a >= 0.01) return `${sign}$${a.toFixed(2)}`;
+  return a === 0 ? '$0' : `<$0.01`;
+}
+
 export const pct = (x: number | null | undefined, digits = 1) =>
   x === null || x === undefined ? '—' : `${x.toFixed(digits)}%`;
 

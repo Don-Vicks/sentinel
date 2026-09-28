@@ -1,6 +1,7 @@
 //! Per-transaction interpretation: failure fingerprints and feed summaries.
 
 use crate::model::{Fingerprint, LargestTransfer, TxSummary};
+use crate::pricing::PriceBook;
 use vortex::events::{programs, TransferKind, VortexTransaction};
 
 /// Where and why a transaction failed. Uses the deepest failing frame from the
@@ -50,23 +51,38 @@ pub fn short(key: &str) -> String {
     }
 }
 
-pub fn summarize(tx: &VortexTransaction, program_id: &str) -> TxSummary {
+pub fn summarize(tx: &VortexTransaction, program_id: &str, prices: &PriceBook) -> TxSummary {
     let mut instructions: Vec<String> = tx
         .instruction_names_for(program_id)
         .map(str::to_string)
         .collect();
     instructions.dedup();
 
-    let largest = tx
+    let moves = tx
         .transfers
         .iter()
-        .filter(|t| matches!(t.kind, TransferKind::Sol | TransferKind::Token))
-        .filter(|t| t.mint.is_none() || known_stable_or_sol(t.mint.as_deref()))
-        .max_by(|a, b| a.amount.total_cmp(&b.amount))
-        .map(|t| LargestTransfer {
+        .filter(|t| matches!(t.kind, TransferKind::Sol | TransferKind::Token));
+    // Largest by USD when Blur prices anything; otherwise by amount among
+    // SOL and well-known tokens (raw amounts of other tokens aren't comparable).
+    let priced = moves
+        .clone()
+        .filter_map(|t| prices.usd(t.mint.as_deref(), t.amount).map(|usd| (t, usd)))
+        .max_by(|a, b| a.1.total_cmp(&b.1));
+    let largest = match priced {
+        Some((t, usd)) => Some(LargestTransfer {
             amount: t.amount,
             symbol: symbol_for(t.mint.as_deref()),
-        });
+            usd: Some(usd),
+        }),
+        None => moves
+            .filter(|t| t.mint.is_none() || known_stable_or_sol(t.mint.as_deref()))
+            .max_by(|a, b| a.amount.total_cmp(&b.amount))
+            .map(|t| LargestTransfer {
+                amount: t.amount,
+                symbol: symbol_for(t.mint.as_deref()),
+                usd: None,
+            }),
+    };
 
     TxSummary {
         signature: tx.signature.clone(),

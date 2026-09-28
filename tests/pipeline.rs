@@ -100,7 +100,7 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
     let _ = std::fs::remove_file(&dir);
     let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
     let (bus, _) = broadcast::channel(16);
-    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, "http://ui".into()).unwrap();
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
     s.add_program(PROGRAM.into(), None).unwrap();
     store
         .create_rule(AlertRule {

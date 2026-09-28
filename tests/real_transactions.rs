@@ -1,6 +1,7 @@
 //! Sentinel's interpretation layer on real mainnet Pump.fun transactions.
 
 use sentinel::analyze::{fingerprint, summarize};
+use sentinel::pricing::PriceBook;
 use sentinel::trace::{self, OwnerCache};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -31,11 +32,11 @@ async fn failed_trade_fingerprint_and_narrative() {
     assert_eq!(fp.error, "TooMuchSolRequired");
     assert_eq!(fp.code, Some(6002));
 
-    let s = summarize(&tx, PUMP);
+    let s = summarize(&tx, PUMP, &PriceBook::new());
     assert!(!s.success);
     assert!(s.instructions.contains(&"Buy".to_string()));
 
-    let t = trace::build(&tx, &labels(), None, &OwnerCache::default()).await;
+    let t = trace::build(&tx, &labels(), None, &OwnerCache::default(), &PriceBook::new()).await;
     let last = t.narrative.last().unwrap();
     assert!(last.contains("Pump.fun::Buy") && last.contains("TooMuchSolRequired"), "{last}");
     assert!(t.call_tree.iter().any(|c| c.program_id == PUMP && c.success == Some(false)));
@@ -45,7 +46,12 @@ async fn failed_trade_fingerprint_and_narrative() {
 async fn successful_trade_value_flow() {
     let tx = load("pump_ok");
     assert!(fingerprint(&tx).is_none());
-    let t = trace::build(&tx, &labels(), None, &OwnerCache::default()).await;
+    let prices = PriceBook::new();
+    prices.insert(sentinel::pricing::WSOL, 200.0, 0.0);
+    let t = trace::build(&tx, &labels(), None, &OwnerCache::default(), &prices).await;
+    let sol_flow = t.flows.iter().find(|f| f.symbol == "SOL").unwrap();
+    assert!((sol_flow.usd.unwrap() - sol_flow.amount * 200.0).abs() < 1e-9);
+    assert!(t.narrative.iter().any(|l| l.contains("SOL ($")), "{:?}", t.narrative);
     assert!(!t.reverted);
     assert!(t.flows.iter().any(|f| f.symbol == "SOL"));
     assert!(t.flows.iter().any(|f| f.symbol != "SOL"));

@@ -1,7 +1,7 @@
 import { Link } from 'react-router';
 import { CheckCircle2, XCircle } from 'lucide-react';
 import type { TxSummary } from '../lib/types';
-import { clock, compact, short } from '../lib/format';
+import { clock, compact, short, usd } from '../lib/format';
 
 export function TxTable({ rows, fresh }: { rows: TxSummary[]; fresh?: Set<string> }) {
   return (
@@ -43,7 +43,14 @@ export function TxTable({ rows, fresh }: { rows: TxSummary[]; fresh?: Set<string
               <td className="num text-xs text-right">{compact(t.compute_units)}</td>
               <td className="font-mono text-xs text-ink-2">{short(t.fee_payer)}</td>
               <td className="num text-xs text-right whitespace-nowrap">
-                {t.largest_transfer ? `${compact(t.largest_transfer.amount)} ${t.largest_transfer.symbol}` : '—'}
+                {t.largest_transfer ? (
+                  <>
+                    {compact(t.largest_transfer.amount)} {t.largest_transfer.symbol}
+                    {usd(t.largest_transfer.usd) && <span className="block text-ink-3">{usd(t.largest_transfer.usd)}</span>}
+                  </>
+                ) : (
+                  '—'
+                )}
               </td>
             </tr>
           ))}

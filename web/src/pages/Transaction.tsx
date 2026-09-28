@@ -2,7 +2,7 @@ import { Link, useParams } from 'react-router';
 import { ArrowRight, CheckCircle2, ExternalLink, RotateCcw, XCircle } from 'lucide-react';
 import { useFetch } from '../lib/api';
 import type { CallNode, Party, TransactionDetail } from '../lib/types';
-import { clock, compact, explorer, explorerAccount, num, short, sol } from '../lib/format';
+import { clock, compact, explorer, explorerAccount, num, short, sol, usd } from '../lib/format';
 import { Address, CopyButton, Empty, ErrorState, PageSkeleton, Panel, Stat } from '../components/ui';
 
 function PartyPill({ p, address }: { p?: Party; address: string }) {
@@ -136,7 +136,7 @@ export function Transaction() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Panel
-          title="Value flow"
+          title={trace.flows.some((f) => f.usd !== null) ? 'Value flow (USD via Solami Blur)' : 'Value flow'}
           action={trace.reverted ? (
             <span className="inline-flex items-center gap-1 text-xs text-warn"><RotateCcw className="size-3.5" aria-hidden />Rolled back</span>
           ) : undefined}
@@ -152,6 +152,7 @@ export function Transaction() {
                     <span className="num font-semibold whitespace-nowrap">
                       {compact(f.amount)} {f.symbol}
                     </span>
+                    {usd(f.usd) && <span className="num text-ink-2">{usd(f.usd)}</span>}
                     <ArrowRight className="size-4 text-ink-3" aria-hidden />
                     <span className="text-ink-3 num">ix {f.instruction}</span>
                   </span>
@@ -168,7 +169,7 @@ export function Transaction() {
           ) : (
             <table className="table">
               <thead>
-                <tr><th>Owner</th><th>Asset</th><th className="text-right">Change</th></tr>
+                <tr><th>Owner</th><th>Asset</th><th className="text-right">Change</th><th className="text-right">USD</th></tr>
               </thead>
               <tbody>
                 {trace.balance_changes.map((b, i) => (
@@ -178,6 +179,7 @@ export function Transaction() {
                     <td className={`num text-right ${b.delta < 0 ? 'text-crit' : 'text-good'}`}>
                       {b.delta > 0 ? '+' : ''}{compact(b.delta)}
                     </td>
+                    <td className="num text-right text-ink-2">{usd(b.usd) ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>

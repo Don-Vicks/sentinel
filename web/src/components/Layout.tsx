@@ -41,6 +41,13 @@ function StreamPanel() {
         <dd className="num text-right text-ink">{stream ? `${stream.slot_lag} slots` : '—'}</dd>
         <dt className="text-ink-3">Last tx</dt>
         <dd className="num text-right text-ink">{age == null ? '—' : `${(age / 1000).toFixed(1)}s ago`}</dd>
+        <dt className="text-ink-3">Blur prices</dt>
+        <dd
+          className={`num text-right ${stream?.pricing.last_error ? 'text-warn' : 'text-ink'}`}
+          title={stream?.pricing.last_error ?? undefined}
+        >
+          {!stream ? '—' : !stream.pricing.enabled ? 'off' : stream.pricing.last_error ? 'error' : `${num(stream.pricing.priced_mints)} mints`}
+        </dd>
         <dt className="text-ink-3">Dropped</dt>
         <dd className={`num text-right ${stream?.dropped ? 'text-warn' : 'text-ink'}`}>{stream ? num(stream.dropped) : '—'}</dd>
       </dl>

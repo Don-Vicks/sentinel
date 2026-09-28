@@ -39,8 +39,9 @@ async fn main() -> Result<()> {
     }
     let (event_tx, mut event_rx) = mpsc::channel::<GeyserEvent>(20_000);
     let filters = hub.stream_filters();
+    let simulating = simulate.is_some();
     tokio::spawn(async move {
-        if simulate.is_some() {
+        if simulating {
             return;
         }
         loop {
@@ -79,9 +80,28 @@ async fn main() -> Result<()> {
     if rpc.is_none() {
         tracing::warn!("SOLANA_RPC_URL not set; account owner labels in traces are disabled");
     }
+    // Solami Blur prices transfers in USD. The same Solami key works if it
+    // carries the DataApi permission.
+    let prices = sentinel::pricing::PriceBook::new();
+    let blur_key = env::var("BLUR_API_KEY")
+        .or_else(|_| env::var("YELLOWSTONE_TOKEN"))
+        .ok()
+        .filter(|k| !k.is_empty());
+    match blur_key {
+        Some(key) if simulate.is_none() => {
+            let url = env::var("BLUR_API_URL").unwrap_or_else(|_| "https://api.solami.dev".into());
+            prices.spawn(url, key);
+        }
+        _ => tracing::warn!("Blur pricing disabled (no BLUR_API_KEY); transfers show no USD values"),
+    }
+    if simulate.is_some() {
+        // Fixed demo prices so USD values render without a key.
+        prices.insert(sentinel::pricing::WSOL, 180.0, f64::INFINITY);
+    }
+
     let store = Arc::new(Store::open(&db_path)?);
     let source: Arc<dyn VortexSource> = hub.clone();
-    let sentinel = Sentinel::new(store, source, rpc, public_url.clone())?;
+    let sentinel = Sentinel::new(store, source, rpc, prices, public_url.clone())?;
 
     for id in env::var("SENTINEL_PROGRAMS").unwrap_or_default().split(',') {
         let id = id.trim();

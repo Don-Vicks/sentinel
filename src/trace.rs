@@ -4,6 +4,7 @@
 //! and PDAs are labelled by the program that controls them.
 
 use crate::analyze::{short, symbol_for};
+use crate::pricing::PriceBook;
 use serde::Serialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
@@ -44,6 +45,8 @@ pub struct Flow {
     pub instruction: String,
     pub from_account: Option<String>,
     pub to_account: Option<String>,
+    /// Value at the Solami Blur last-trade price, if priced.
+    pub usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +55,7 @@ pub struct BalanceChange {
     pub symbol: String,
     pub mint: Option<String>,
     pub delta: f64,
+    pub usd: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -128,6 +132,7 @@ pub async fn build(
     monitored: &HashMap<String, String>,
     rpc: Option<&RpcClient>,
     cache: &OwnerCache,
+    prices: &PriceBook,
 ) -> Trace {
     let flows: Vec<Flow> = tx
         .transfers
@@ -151,6 +156,7 @@ pub async fn build(
                 instruction: t.instruction.clone(),
                 from_account: t.from.clone(),
                 to_account: t.to.clone(),
+                usd: prices.usd(t.mint.as_deref(), t.amount),
             }
         })
         .filter(|f| f.amount > 0.0)
@@ -195,7 +201,7 @@ pub async fn build(
         .collect();
     let name = |a: &str| label_of.get(a).map(|s| s.to_string()).unwrap_or_else(|| short(a));
 
-    let balance_changes = balance_changes(tx);
+    let balance_changes = balance_changes(tx, prices);
     let state_changes = state_changes(tx);
     let call_tree = call_tree(&tx.invocations, monitored);
     let narrative = narrative(tx, &flows, &call_tree, monitored, &name);
@@ -268,7 +274,7 @@ fn party(
     }
 }
 
-fn balance_changes(tx: &VortexTransaction) -> Vec<BalanceChange> {
+fn balance_changes(tx: &VortexTransaction, prices: &PriceBook) -> Vec<BalanceChange> {
     let mut out = Vec::new();
     for a in &tx.accounts {
         let delta = a.post_lamports as f64 - a.pre_lamports as f64;
@@ -278,6 +284,7 @@ fn balance_changes(tx: &VortexTransaction) -> Vec<BalanceChange> {
                 symbol: "SOL".into(),
                 mint: None,
                 delta: delta / 1e9,
+                usd: prices.usd(None, delta / 1e9),
             });
         }
     }
@@ -292,6 +299,7 @@ fn balance_changes(tx: &VortexTransaction) -> Vec<BalanceChange> {
         out.push(BalanceChange {
             owner,
             symbol: symbol_for(Some(&mint)),
+            usd: prices.usd(Some(&mint), delta),
             mint: Some(mint),
             delta,
         });
@@ -387,6 +395,15 @@ fn fmt_amount(x: f64) -> String {
     }
 }
 
+fn usd_suffix(usd: Option<f64>) -> String {
+    match usd {
+        Some(u) if u >= 1_000_000.0 => format!(" (${:.2}M)", u / 1_000_000.0),
+        Some(u) if u >= 10_000.0 => format!(" (${:.1}K)", u / 1_000.0),
+        Some(u) if u >= 0.01 => format!(" (${u:.2})"),
+        _ => String::new(),
+    }
+}
+
 fn narrative(
     tx: &VortexTransaction,
     flows: &[Flow],
@@ -434,7 +451,7 @@ fn narrative(
         let line = match f.kind {
             TransferKind::Mint => format!("{} {} {} {}", fmt_amount(f.amount), f.symbol, verb, name(&f.to)),
             TransferKind::Burn => format!("{} {} {} {}", fmt_amount(f.amount), f.symbol, verb, name(&f.from)),
-            _ => format!("{} {}: {} {} {}", fmt_amount(f.amount), f.symbol, name(&f.from), verb, name(&f.to)),
+            _ => format!("{} {}{}: {} {} {}", fmt_amount(f.amount), f.symbol, usd_suffix(f.usd), name(&f.from), verb, name(&f.to)),
         };
         lines.push(line);
     }

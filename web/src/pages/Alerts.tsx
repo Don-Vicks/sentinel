@@ -8,7 +8,7 @@ import type { AlertExecution, AlertRule, Condition, Metric, Severity } from '../
 import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, Panel, Skeleton, Spinner } from '../components/ui';
 
-type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'incident';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
@@ -16,6 +16,7 @@ const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: numb
   { id: 'tps', label: 'TPS is above', unit: 'TPS', defaultValue: 50 },
   { id: 'avg_compute', label: 'Average compute is above', unit: 'CU', defaultValue: 200_000 },
   { id: 'max_compute', label: 'Any transaction uses more than', unit: 'CU', defaultValue: 1_000_000 },
+  { id: 'transfer_usd', label: 'A single transfer is worth at least (USD)', unit: 'USD', defaultValue: 100_000 },
   { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000 },
   { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
 ];
@@ -40,6 +41,8 @@ function describe(c: Condition) {
       };
       return `${names[c.metric]} ${c.op} ${c.value.toLocaleString()}${c.metric === 'failure_rate' ? '%' : ''} over ${c.window_secs}s`;
     }
+    case 'transfer_usd':
+      return `transfer worth ≥ $${c.min_usd.toLocaleString()} (Blur price)`;
     case 'transfer':
       return `transfer ≥ ${c.min_amount.toLocaleString()} ${MINTS.find((m) => m.value === (c.mint ?? ''))?.label ?? short(c.mint)}`;
     case 'incident':
@@ -68,6 +71,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const condition = (): Condition => {
     const v = Number(value);
     if (template === 'transfer') return { type: 'transfer', mint: mint || null, min_amount: v };
+    if (template === 'transfer_usd') return { type: 'transfer_usd', min_usd: v };
     if (template === 'incident') return { type: 'incident', kinds: [], min_severity: minSeverity };
     return { type: 'metric', metric: template as Metric, op: '>', value: v, window_secs: Number(windowSecs) || 60 };
   };
@@ -146,7 +150,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
               <input id="rule-value" className="input num" type="number" inputMode="decimal" min="0" step="any" value={value} onChange={(e) => setValue(e.target.value)} />
               {tpl.unit && <span className="text-ink-3 text-xs">{tpl.unit}</span>}
             </div>
-            {template === 'transfer' ? (
+            {template === 'transfer_usd' ? (
+              <p className="text-xs text-ink-3">Priced by Solami Blur. Tokens under $10K liquidity are ignored.</p>
+            ) : template === 'transfer' ? (
               <div>
                 <label className="sr-only" htmlFor="rule-mint">Asset</label>
                 <select id="rule-mint" className="input" value={mint} onChange={(e) => setMint(e.target.value)}>

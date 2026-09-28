@@ -15,6 +15,7 @@ VORTEX   geyser::client → geyser::stream (live-updatable filters, keepalive, r
    ▼
 SENTINEL engine: 1s rolling windows → detectors + alert rules → incidents (linked txs, failure fingerprints)
          tracer: value flow, balance and state changes, account owners via Solami RPC
+         pricing: USD values for every mint seen, via Solami Blur
          SQLite (incidents, rules, deliveries) · HTTP + SSE API · webhooks (Discord/Slack/any)
    ▼
 Dashboard (live over SSE)
@@ -29,7 +30,7 @@ Dashboard (live over SSE)
   - activity spike (mean + zσ)
   - activity stopped
   - compute spike
-  - large transfer
+  - large transfer, by amount per asset or by USD value (Blur-priced, liquid tokens only)
 
   Seconds inside an open incident are left out of later baselines, so one incident doesn't mask the next.
 - **Incidents** link to the actual transactions (stored, so they survive the in-memory window). They record affected wallets, onset, peak, detection latency, and auto-resolve.
@@ -39,7 +40,7 @@ Dashboard (live over SSE)
   - net balance changes
   - the program call tree with per-program compute
   - account state diffs, instructions and logs
-- **Alert rules.** Supported conditions: failure rate, failed count, TPS, avg or max compute over a window, single transfers above a size, or any incident above a severity. Each rule can open an incident, POST a webhook (with Discord and Slack formatting), or both. Every delivery is logged with its status and latency.
+- **Alert rules.** Supported conditions: failure rate, failed count, TPS, avg or max compute over a window, single transfers above a size or a USD value, or any incident above a severity. Each rule can open an incident, POST a webhook (with Discord and Slack formatting), or both. Every delivery is logged with its status and latency.
 - **Stream health.** The dashboard shows ingest tx/s, current slot, tip lag in slots, time since the last transaction, and events dropped.
 
 ## How Solami is used
@@ -47,6 +48,7 @@ Dashboard (live over SSE)
 | Solami product | Role |
 |---|---|
 | **Yellowstone gRPC** | The only data path. One subscription carries slots plus a named transaction filter over every monitored program (`account_include`, failed transactions included). Adding a program in the UI re-sends the filter over the open stream, with no reconnect. The stream answers pings and reconnects with backoff. |
+| **Blur** | `POST /data/token/price` prices every mint Sentinel sees move, in batches of up to 1000. A new mint is priced within about a second; known ones refresh every 30s. USD appears on the live feed, value-flow edges, balance changes and narratives. It also powers the USD large-transfer detector and "transfer worth ≥ $X" rules. Tokens under $10K liquidity are displayed but never trigger alerts, since one trade can move their price arbitrarily. |
 | **RPC** | `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
 
 ## Run it
@@ -74,6 +76,8 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `YELLOWSTONE_ENDPOINT` | — | Solami gRPC endpoint, e.g. `https://grpc.solami.dev` |
 | `YELLOWSTONE_TOKEN` | — | Solami API key (sent as `x-token`) |
 | `SOLANA_RPC_URL` | — | Solami RPC URL, used for owner labels in traces and by the canary |
+| `BLUR_API_KEY` | `YELLOWSTONE_TOKEN` | Solami key with the `DataApi` permission, for USD prices. Leave unset to fall back to the gRPC key |
+| `BLUR_API_URL` | `https://api.solami.dev` | Blur REST base URL |
 | `SENTINEL_PROGRAMS` | — | Comma-separated program IDs to monitor at startup |
 | `SENTINEL_PORT` | `8080` | HTTP port (API + dashboard) |
 | `SENTINEL_DB` | `sentinel.db` | SQLite file |
@@ -131,6 +135,8 @@ cargo test
 
 `tests/real_transactions.rs` runs fingerprinting and tracing on real mainnet Pump.fun transactions: a failed Buy reached through a bot router, a successful trade, and a version 1 transaction. It asserts, for example, that the failure is attributed to `Pump.fun::Buy → TooMuchSolRequired (6002)`. The decoder itself has matching fixture tests in Vortex (`crates/vortex/tests/real_transactions.rs`).
 
+`tests/pricing.rs` runs a mock Blur server with the documented response shape (decimals as strings, key in `x-api-key`). It also checks that USD large-transfer detection ignores thin-liquidity tokens and that a USD alert rule fires on a liquid one.
+
 `tests/pipeline.rs` drives the real engine through a full cycle:
 - healthy baseline
 - failure spike → incident with linked transactions and fingerprints
@@ -142,6 +148,7 @@ cargo test
 
 - Timestamps are Sentinel's receive time at `Processed` commitment; a transaction on a dropped fork can appear briefly.
 - Version 1 transactions carry compute-unit limit and price in a transaction config, not ComputeBudget instructions. Sentinel reports compute used for them, but not the limit or priority fee.
+- USD values use Blur's last-trade price at the time Sentinel sees the transfer. A mint seen for the first time is valued about a second later, so its very first transfer can't trigger a USD alert.
 - Program instructions are named from logs (Anchor `Instruction: X`), not IDLs. Truncated logs lose names beyond the cut.
 - Metrics and recent transactions live in memory (15 min). Incidents and their transactions are persisted. Detector state resets on restart, and incidents left open are closed out.
 

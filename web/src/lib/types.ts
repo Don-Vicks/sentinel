@@ -12,6 +12,7 @@ export type Health = 'healthy' | 'degraded' | 'critical' | 'warming_up' | 'idle'
 export interface LargestTransfer {
   amount: number;
   symbol: string;
+  usd: number | null;
 }
 
 export interface TxSummary {
@@ -121,6 +122,13 @@ export interface StreamHealth {
   dropped: number;
   programs_streamed: string[];
   uptime_secs: number;
+  pricing: {
+    enabled: boolean;
+    priced_mints: number;
+    tracked_mints: number;
+    last_refresh: string | null;
+    last_error: string | null;
+  };
 }
 
 export type Metric =
@@ -135,6 +143,7 @@ export type Metric =
 export type Condition =
   | { type: 'metric'; metric: Metric; op: '>' | '>=' | '<' | '<='; value: number; window_secs: number }
   | { type: 'transfer'; mint: string | null; min_amount: number }
+  | { type: 'transfer_usd'; min_usd: number }
   | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity };
 
 export interface AlertRule {
@@ -239,6 +248,7 @@ export interface Flow {
   instruction: string;
   from_account: string | null;
   to_account: string | null;
+  usd: number | null;
 }
 
 export interface CallNode {
@@ -257,7 +267,7 @@ export interface CallNode {
 export interface Trace {
   parties: Party[];
   flows: Flow[];
-  balance_changes: { owner: string; symbol: string; mint: string | null; delta: number }[];
+  balance_changes: { owner: string; symbol: string; mint: string | null; delta: number; usd: number | null }[];
   state_changes: {
     account: string;
     owner: string | null;
