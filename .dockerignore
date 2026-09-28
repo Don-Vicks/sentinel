@@ -1,0 +1,8 @@
+target
+web/node_modules
+web/dist
+.env
+*.db
+*.db-*
+canary-keypair.json
+.git

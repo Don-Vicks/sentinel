@@ -5,6 +5,7 @@
 
 use crate::analyze::{short, symbol_for};
 use crate::idl::{DecodedInstruction, IdlError, IdlRegistry};
+use base64::Engine;
 use crate::pricing::PriceBook;
 use serde::Serialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -263,7 +264,7 @@ async fn decode_with_idls(
         .iter()
         .filter_map(|ix| {
             let idl = by_program.get(ix.program_id.as_str())?;
-            let data = bs58::decode(&ix.data).into_vec().ok()?;
+            let data = base64::engine::general_purpose::STANDARD.decode(&ix.data).ok()?;
             Some(DecodedView {
                 path: ix.path.clone(),
                 program_id: ix.program_id.clone(),

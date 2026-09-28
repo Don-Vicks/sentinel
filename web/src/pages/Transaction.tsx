@@ -274,7 +274,7 @@ export function Transaction() {
                   ) : (
                     <>
                       {ix.parsed != null && <pre className="rounded bg-sunken p-2 overflow-x-auto">{JSON.stringify(ix.parsed, null, 2)}</pre>}
-                      <div className="font-mono break-all text-ink-2"><span className="text-ink-3 font-sans">Data </span>{ix.data || '—'}</div>
+                      <div className="font-mono break-all text-ink-2"><span className="text-ink-3 font-sans">Data (base64) </span>{ix.data || '—'}</div>
                       <ol className="list-decimal list-inside font-mono text-ink-2 space-y-0.5">
                         {ix.accounts.map((a, i) => <li key={i}>{a}</li>)}
                       </ol>

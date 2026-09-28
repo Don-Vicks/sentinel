@@ -1,6 +1,7 @@
 //! Anchor IDL decoding against Pump.fun's real on-chain IDL account and a
 //! real mainnet Buy.
 
+use base64::Engine;
 use sentinel::idl::{decode_idl_account, idl_address, Idl};
 use serde_json::Value;
 use solana_sdk::pubkey::Pubkey;
@@ -34,7 +35,7 @@ fn decodes_real_buy_and_errors() {
     let tx = decode_transaction(frame, vec![]).unwrap();
 
     let ix = tx.instructions.iter().find(|i| i.program_id == PUMP && i.name.as_deref() == Some("Buy")).unwrap();
-    let data = bs58::decode(&ix.data).into_vec().unwrap();
+    let data = base64::engine::general_purpose::STANDARD.decode(&ix.data).unwrap();
     let decoded = idl.decode_instruction(&data, &ix.accounts).expect("matches an IDL instruction");
     assert_eq!(decoded.name, "buy");
     assert!(decoded.args["amount"].as_u64().unwrap() > 0);
