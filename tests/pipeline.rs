@@ -165,6 +165,22 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
     let resolved = store.incident(inc.id).unwrap().unwrap();
     assert_eq!(resolved.status, IncidentStatus::Resolved);
 
+    // A second spike is judged against a baseline that excludes the first.
+    for sec in t0 + 600..t0 + 630 {
+        for i in 0..5 {
+            n += 1;
+            s.on_transaction(tx(n, sec, i >= 3));
+        }
+        s.on_tick(sec + 1);
+    }
+    let second = store
+        .incidents(Some(PROGRAM), 10)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind == IncidentKind::FailureSpike && i.id != inc.id)
+        .expect("second failure spike");
+    assert!(second.baseline.unwrap() < 5.0, "baseline {:?} polluted", second.baseline);
+
     // Webhook delivered for the incident.
     for _ in 0..50 {
         if !received.lock().unwrap().is_empty() {

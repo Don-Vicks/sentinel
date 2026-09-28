@@ -311,6 +311,18 @@ impl Sentinel {
                 (IncidentKind::ActivityDrop, detect::activity_drop(&ps.window, &cfg, now)),
                 (IncidentKind::ComputeSpike, detect::compute_spike(&ps.window, &cfg, now)),
             ];
+            // Keep seconds inside an open incident out of future baselines.
+            use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
+            for (kind, bit, win) in [
+                (IncidentKind::FailureSpike, ANOMALY_FAILURE, cfg.failure_window_secs),
+                (IncidentKind::ActivitySpike, ANOMALY_ACTIVITY, cfg.activity_window_secs),
+                (IncidentKind::ActivityDrop, ANOMALY_ACTIVITY, 60),
+                (IncidentKind::ComputeSpike, ANOMALY_COMPUTE, cfg.compute_window_secs),
+            ] {
+                if ps.open.contains_key(kind.as_str()) {
+                    ps.window.flag(now, win as i64, bit);
+                }
+            }
             for (kind, detection) in detections {
                 let key = kind.as_str().to_string();
                 match detection {
@@ -419,13 +431,15 @@ impl Sentinel {
             open.quiet_since = None;
             let inc = &mut open.incident;
             inc.observed = Some(d.observed);
+            // The headline tracks the worst point; the explanation keeps the
+            // numbers from the moment it fired.
             if inc.peak.is_none_or(|p| d.observed > p) {
                 inc.peak = Some(d.observed);
+                inc.summary = d.summary;
                 open.dirty = true;
             }
             if d.severity > inc.severity {
                 inc.severity = d.severity;
-                inc.summary = d.summary;
                 open.dirty = true;
             }
             return None;

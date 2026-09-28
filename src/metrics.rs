@@ -17,7 +17,14 @@ pub struct Bucket {
     pub fees: u64,
     pub signers: HashSet<String>,
     pub fingerprints: HashMap<String, u32>,
+    /// Bitmask of detectors that considered this second anomalous; such
+    /// seconds are left out of that detector's future baselines.
+    pub anomalous: u8,
 }
+
+pub const ANOMALY_FAILURE: u8 = 1;
+pub const ANOMALY_ACTIVITY: u8 = 2;
+pub const ANOMALY_COMPUTE: u8 = 4;
 
 #[derive(Debug, Default, Clone)]
 pub struct Stats {
@@ -139,12 +146,28 @@ impl Window {
         self.first_second.map(|f| now - f).unwrap_or(0)
     }
 
+    /// Marks `[now - from_ago, now)` as anomalous for the given detector bit.
+    pub fn flag(&mut self, now: i64, from_ago: i64, bit: u8) {
+        for b in self.buckets.iter_mut().filter(|b| b.second >= now - from_ago && b.second < now) {
+            b.anomalous |= bit;
+        }
+    }
+
     /// Aggregates seconds in `[now - from_ago, now - to_ago)`.
     pub fn stats(&self, now: i64, from_ago: i64, to_ago: i64) -> Stats {
+        self.stats_masked(now, from_ago, to_ago, 0)
+    }
+
+    /// Like `stats`, skipping seconds flagged with any bit in `mask`.
+    pub fn stats_masked(&self, now: i64, from_ago: i64, to_ago: i64, mask: u8) -> Stats {
         let (start, end) = (now - from_ago, now - to_ago);
         let mut s = Stats::default();
         let mut signers: HashSet<&str> = HashSet::new();
-        for b in self.buckets.iter().filter(|b| b.second >= start && b.second < end) {
+        for b in self
+            .buckets
+            .iter()
+            .filter(|b| b.second >= start && b.second < end && b.anomalous & mask == 0)
+        {
             s.seconds += 1;
             s.tx += b.tx as u64;
             s.failed += b.failed as u64;
@@ -162,17 +185,18 @@ impl Window {
     }
 
     /// Transaction counts per `chunk`-second slice over `[now - from_ago, now - to_ago)`.
-    pub fn chunk_counts(&self, now: i64, from_ago: i64, to_ago: i64, chunk: i64) -> Vec<f64> {
+    /// Chunks containing a second flagged with `mask` are skipped.
+    pub fn chunk_counts(&self, now: i64, from_ago: i64, to_ago: i64, chunk: i64, mask: u8) -> Vec<f64> {
         let (start, end) = (now - from_ago, now - to_ago);
         let mut out = Vec::new();
         let mut cursor = start;
         while cursor + chunk <= end {
-            let n: u32 = self
-                .buckets
-                .iter()
-                .filter(|b| b.second >= cursor && b.second < cursor + chunk)
-                .map(|b| b.tx)
-                .sum();
+            let in_chunk = || self.buckets.iter().filter(|b| b.second >= cursor && b.second < cursor + chunk);
+            if in_chunk().any(|b| b.anomalous & mask != 0) {
+                cursor += chunk;
+                continue;
+            }
+            let n: u32 = in_chunk().map(|b| b.tx).sum();
             out.push(n as f64);
             cursor += chunk;
         }
@@ -243,7 +267,10 @@ mod tests {
         assert_eq!(last60.tx, 600);
         assert!((last60.failure_rate() - 10.0).abs() < 1e-9);
         assert_eq!(last60.unique_signers, 1);
-        assert_eq!(w.chunk_counts(100, 60, 0, 10), vec![100.0; 6]);
+        assert_eq!(w.chunk_counts(100, 60, 0, 10, 0), vec![100.0; 6]);
+        w.flag(100, 30, ANOMALY_FAILURE);
+        assert_eq!(w.stats_masked(100, 60, 0, ANOMALY_FAILURE).tx, 300);
+        assert_eq!(w.chunk_counts(100, 60, 0, 10, ANOMALY_FAILURE).len(), 3);
     }
 
     #[test]

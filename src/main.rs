@@ -33,9 +33,16 @@ async fn main() -> Result<()> {
 
     // --- Vortex: Geyser stream -> hub ---------------------------------------
     let hub = VortexHub::new(None);
+    let simulate = env::var("SENTINEL_SIMULATE").ok().filter(|p| !p.is_empty());
+    if let Some(program) = &simulate {
+        sentinel::simulate::spawn(hub.clone(), program.clone());
+    }
     let (event_tx, mut event_rx) = mpsc::channel::<GeyserEvent>(20_000);
     let filters = hub.stream_filters();
     tokio::spawn(async move {
+        if simulate.is_some() {
+            return;
+        }
         loop {
             match vortex::geyser::client::connect().await {
                 Ok(client) => {

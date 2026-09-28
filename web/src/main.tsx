@@ -1,0 +1,42 @@
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { BrowserRouter, Link, Route, Routes } from 'react-router';
+import './index.css';
+import { ProgramsProvider } from './lib/programs';
+import { Layout } from './components/Layout';
+import { Overview } from './pages/Overview';
+import { Program } from './pages/Program';
+import { Incident, Incidents } from './pages/Incident';
+import { Transaction } from './pages/Transaction';
+import { Alerts } from './pages/Alerts';
+import { Empty } from './components/ui';
+
+function NotFound() {
+  return (
+    <div className="panel">
+      <Empty title="Page not found">
+        <Link to="/" className="link">Back to overview</Link>
+      </Empty>
+    </div>
+  );
+}
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    <ProgramsProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route index element={<Overview />} />
+            <Route path="programs/:id" element={<Program />} />
+            <Route path="incidents" element={<Incidents />} />
+            <Route path="incidents/:id" element={<Incident />} />
+            <Route path="tx/:sig" element={<Transaction />} />
+            <Route path="alerts" element={<Alerts />} />
+            <Route path="*" element={<NotFound />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </ProgramsProvider>
+  </StrictMode>,
+);

@@ -11,6 +11,7 @@ pub mod detect;
 pub mod engine;
 pub mod live;
 pub mod metrics;
+pub mod simulate;
 pub mod model;
 pub mod source;
 pub mod store;

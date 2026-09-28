@@ -2,7 +2,7 @@
 //! with a trailing baseline that excludes it, and says in plain numbers why it
 //! fired. `None` means the condition is not met this tick.
 
-use crate::metrics::{mean_std, Window};
+use crate::metrics::{mean_std, Window, ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
 use crate::model::{DetectionConfig, IncidentKind, Severity};
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,7 @@ pub fn failure_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Dete
     let win = cfg.failure_window_secs as i64;
     let base_span = (cfg.baseline_secs as i64).min(w.age(now));
     let cur = w.stats(now, win, 0);
-    let base = w.stats(now, base_span, win);
+    let base = w.stats_masked(now, base_span, win, ANOMALY_FAILURE);
     if base.tx < cfg.failure_min_tx as u64 || cur.tx < cfg.failure_min_tx as u64 {
         return None;
     }
@@ -64,7 +64,7 @@ pub fn failure_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Dete
         ),
         explanation: format!(
             "Failure rate over the last {win}s is {rate:.1}% ({} of {} tx). Baseline over the \
-             previous {} is {base_rate:.2}% ({} of {} tx). Threshold is max({}× baseline, baseline \
+             previous {} (excluding earlier incidents) is {base_rate:.2}% ({} of {} tx). Threshold is max({}× baseline, baseline \
              + {} pp) = {threshold:.1}%.",
             cur.failed,
             cur.tx,
@@ -84,7 +84,7 @@ pub fn activity_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Det
     }
     let win = cfg.activity_window_secs as i64;
     let base_span = (cfg.baseline_secs as i64).min(w.age(now));
-    let chunks = w.chunk_counts(now, base_span, win, win);
+    let chunks = w.chunk_counts(now, base_span, win, win, ANOMALY_ACTIVITY);
     if chunks.len() < 5 {
         return None;
     }
@@ -133,7 +133,7 @@ pub fn activity_drop(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Dete
     if base_span <= quiet {
         return None;
     }
-    let base = w.stats(now, base_span, quiet);
+    let base = w.stats_masked(now, base_span, quiet, ANOMALY_ACTIVITY);
     let cur = w.stats(now, quiet, 0);
     // Only meaningful for programs that are normally busy.
     if base.tps() < 0.5 || cur.tx > 0 {
@@ -166,7 +166,7 @@ pub fn compute_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Dete
     let win = cfg.compute_window_secs as i64;
     let base_span = (cfg.baseline_secs as i64).min(w.age(now));
     let cur = w.stats(now, win, 0);
-    let base = w.stats(now, base_span, win);
+    let base = w.stats_masked(now, base_span, win, ANOMALY_COMPUTE);
     if cur.cu_n < cfg.compute_min_tx as u64 || base.cu_n < 2 * cfg.compute_min_tx as u64 {
         return None;
     }
