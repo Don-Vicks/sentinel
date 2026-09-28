@@ -6,3 +6,5 @@ web/node_modules
 web/dist
 keypair*.json
 canary-keypair.json
+.DS_Store
+*.tsbuildinfo
