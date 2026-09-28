@@ -2,7 +2,7 @@
 
 **Incidents, not transactions.** Sentinel watches a Solana program on mainnet in real time. It tells you when something breaks, which error is breaking it, which instruction, how many wallets are affected, and the exact transactions. Then it pages you.
 
-It runs on top of [Vortex](https://github.com/Don-Vicks/solana-tx-stack). Vortex handles the Solami Yellowstone gRPC stream and decodes each transaction. Sentinel turns that stream into metrics, incidents, investigations and alerts.
+It runs on top of [Vortex](https://github.com/Don-Vicks/vortex). Vortex handles the Solami Yellowstone gRPC stream and decodes each transaction. Sentinel turns that stream into metrics, incidents, investigations and alerts.
 
 ```
 Solana mainnet
@@ -55,10 +55,10 @@ Dashboard (live over SSE)
 
 Prerequisites: Rust 1.75+, Node 18+, `protoc` (Vortex compiles Jito protos), and a Solami API key. [Sign up](https://solami.dev/signup); the Pro trial includes gRPC.
 
-The Vortex crate is expected next to this repo, on the `feat/decoded-program-stream` branch:
+Cargo pulls Vortex from [Don-Vicks/vortex](https://github.com/Don-Vicks/vortex) automatically.
 
 ```bash
-git clone -b feat/decoded-program-stream https://github.com/Don-Vicks/solana-tx-stack ../solana-tx-stack
+git clone https://github.com/Don-Vicks/sentinel && cd sentinel
 ```
 
 ```bash
@@ -133,7 +133,7 @@ Webhook payloads are JSON with `event` (`sentinel.alert`, `sentinel.incident`, `
 cargo test
 ```
 
-`tests/real_transactions.rs` runs fingerprinting and tracing on real mainnet Pump.fun transactions: a failed Buy reached through a bot router, a successful trade, and a version 1 transaction. It asserts, for example, that the failure is attributed to `Pump.fun::Buy → TooMuchSolRequired (6002)`. The decoder itself has matching fixture tests in Vortex (`crates/vortex/tests/real_transactions.rs`).
+`tests/real_transactions.rs` runs fingerprinting and tracing on real mainnet Pump.fun transactions: a failed Buy reached through a bot router, a successful trade, and a version 1 transaction. It asserts, for example, that the failure is attributed to `Pump.fun::Buy → TooMuchSolRequired (6002)`. The decoder itself has matching fixture tests in [Vortex](https://github.com/Don-Vicks/vortex/blob/master/crates/vortex/tests/real_transactions.rs).
 
 `tests/pricing.rs` runs a mock Blur server with the documented response shape (decimals as strings, key in `x-api-key`). It also checks that USD large-transfer detection ignores thin-liquidity tokens and that a USD alert rule fires on a liquid one.
 

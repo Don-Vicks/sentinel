@@ -14,7 +14,7 @@ name = "sentinel"
 path = "src/main.rs"
 
 [dependencies]
-vortex = { package = "solana-vortex", path = "../solana-tx-stack/crates/vortex" }
+vortex = { package = "solana-vortex", git = "https://github.com/Don-Vicks/vortex", branch = "master" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"

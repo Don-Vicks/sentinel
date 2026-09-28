@@ -72,4 +72,4 @@ Solana ─▶ Solami Yellowstone gRPC
    └──────────────────────────────────────────────────────────┘
 ```
 
-Sentinel depends only on `vortex::events::VortexTransaction`, a documented public model, and on the `VortexSource` trait. It never touches the proto types or `core` internals. The Vortex changes live on the `feat/decoded-program-stream` branch of solana-tx-stack.
+Sentinel depends only on `vortex::events::VortexTransaction`, a documented public model, and on the `VortexSource` trait. It never touches the proto types or `core` internals. The Vortex changes are on `master` of [Don-Vicks/vortex](https://github.com/Don-Vicks/vortex).
