@@ -9,7 +9,7 @@ RUN npm run build
 # --- server ----------------------------------------------------------------
 FROM rust:1-slim-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      protobuf-compiler pkg-config libssl-dev git ca-certificates \
+      build-essential protobuf-compiler libprotobuf-dev pkg-config libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
