@@ -4,21 +4,29 @@
 
 It runs on top of [Vortex](https://github.com/Don-Vicks/vortex). Vortex handles the Solami Yellowstone gRPC stream and decodes each transaction. Sentinel turns that stream into metrics, incidents, investigations and alerts.
 
-```
-Solana mainnet
-   │  Solami Yellowstone gRPC (server-side program filters, failed txs included)
-   ▼
-VORTEX   geyser::client → geyser::stream (live-updatable filters, keepalive, reconnect)
-         geyser::decode → VortexTransaction (errors, CU, call tree from logs, SOL/SPL transfers)
-         VortexHub      → broadcast bus + program filter registry
-   │  trait VortexSource
-   ▼
-SENTINEL engine: 1s rolling windows → detectors + alert rules → incidents (linked txs, failure fingerprints)
-         tracer: value flow, balance and state changes, account owners via Solami RPC
-         pricing: USD values for every mint seen, via Solami Blur
-         SQLite (incidents, rules, deliveries) · HTTP + SSE API · webhooks (Discord/Slack/any)
-   ▼
-Dashboard (live over SSE)
+<!-- Demo video and screenshots: added after the live mainnet recording. -->
+
+```mermaid
+flowchart TD
+    SOL[Solana mainnet] --> GRPC["Solami Yellowstone gRPC<br/>program filters · failed txs · live filter updates"]
+    subgraph VORTEX [Vortex]
+        GRPC --> STREAM[geyser::stream<br/>keepalive · reconnect]
+        STREAM --> DECODE[geyser::decode<br/>errors · CU · call tree · transfers]
+        DECODE --> HUB[VortexHub<br/>broadcast bus + filter registry]
+    end
+    HUB -- trait VortexSource --> ENGINE
+    subgraph SENTINEL [Sentinel]
+        ENGINE[Engine<br/>1s rolling windows] --> DET[Detectors + alert rules]
+        DET --> INC[Incidents<br/>linked txs · fingerprints · timelines]
+        INC --> HOOK[Webhooks<br/>Discord · Slack · JSON]
+        TRACE[Tracer<br/>value flow · state diffs · IDL decoding]
+        BLUR[Solami Blur<br/>USD prices] --> ENGINE
+        BLUR --> TRACE
+        RPC[Solami RPC<br/>any signature · owners · IDLs] --> TRACE
+    end
+    ENGINE -- SSE --> UI[Dashboard]
+    INC --> UI
+    TRACE --> UI
 ```
 
 ## What it does
@@ -47,26 +55,43 @@ Dashboard (live over SSE)
 - **Alert rules.** Supported conditions: failure rate, failed count, TPS, avg or max compute over a window, single transfers above a size or a USD value, or any incident above a severity. Each rule can open an incident, POST a webhook (with Discord and Slack formatting), or both. Every delivery is logged with its status and latency.
 - **Stream health.** The dashboard shows ingest tx/s, current slot, tip lag in slots, time since the last transaction, and events dropped.
 
+## Numbers
+
+Measured with `cargo run --release --example bench` on real mainnet Pump.fun transactions, one core, Apple M-series laptop:
+
+| Path | Throughput |
+|---|---|
+| Vortex decoder (Yellowstone frame → `VortexTransaction`) | ~13,000 tx/s (≈75 µs per Pump.fun transaction) |
+| Sentinel engine (metrics, detectors, rules, incident linking into SQLite) | ~45,000 tx/s, with a failure storm in progress |
+
+Pump.fun, one of the busiest programs on Solana, runs well below both. Detection runs on a 1-second tick. Each incident records its own detection latency, measured from the triggering transaction reaching Sentinel.
+
 ## How Solami is used
 
 | Solami product | Role |
 |---|---|
 | **Yellowstone gRPC** | The only data path. One subscription carries slots plus a named transaction filter over every monitored program (`account_include`, failed transactions included). Adding a program in the UI re-sends the filter over the open stream, with no reconnect. The stream answers pings and reconnects with backoff. |
 | **Blur** | `POST /data/token/price` prices every mint Sentinel sees move, in batches of up to 1000. A new mint is priced within about a second; known ones refresh every 30s. USD appears on the live feed, value-flow edges, balance changes and narratives. It also powers the USD large-transfer detector and "transfer worth ≥ $X" rules. Tokens under $10K liquidity are displayed but never trigger alerts, since one trade can move their price arbitrarily. |
-| **RPC** | `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
+| **RPC** | Anchor IDLs are fetched from chain with `getAccountInfo`. `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
 
 ## Run it
 
-Prerequisites: Rust 1.75+, Node 18+, `protoc` (Vortex compiles Jito protos), and a Solami API key. [Sign up](https://solami.dev/signup); the Pro trial includes gRPC.
+You need a Solami API key. [Sign up](https://solami.dev/signup); the Pro trial includes gRPC.
 
-Cargo pulls Vortex from [Don-Vicks/vortex](https://github.com/Don-Vicks/vortex) automatically.
+### Docker (one command)
 
 ```bash
 git clone https://github.com/Don-Vicks/sentinel && cd sentinel
+cp .env.example .env        # add your Solami key
+docker compose up --build
 ```
 
+### From source
+
+Prerequisites: Rust 1.75+, Node 18+, and `protoc` (Vortex compiles Jito protos). Cargo pulls Vortex from [Don-Vicks/vortex](https://github.com/Don-Vicks/vortex) automatically.
+
 ```bash
-cp .env.example .env        # add your Solami key
+cp .env.example .env
 cd web && npm install && npm run build && cd ..
 cargo run --release
 ```
@@ -156,7 +181,7 @@ cargo test
 - Timestamps are Sentinel's receive time at `Processed` commitment; a transaction on a dropped fork can appear briefly.
 - Version 1 transactions carry compute-unit limit and price in a transaction config, not ComputeBudget instructions. Sentinel reports compute used for them, but not the limit or priority fee.
 - USD values use Blur's last-trade price at the time Sentinel sees the transfer. A mint seen for the first time is valued about a second later, so its very first transfer can't trigger a USD alert.
-- Program instructions are named from logs (Anchor `Instruction: X`), not IDLs. Truncated logs lose names beyond the cut.
+- Instruction names come from logs (Anchor `Instruction: X`); arguments and account names need an on-chain Anchor IDL, which most major programs publish. Truncated logs lose names beyond the cut.
 - Metrics and recent transactions live in memory (15 min). Incidents and their transactions are persisted. Detector state resets on restart, and incidents left open are closed out.
 
 See [docs/VORTEX_AUDIT.md](docs/VORTEX_AUDIT.md) for how Sentinel was fitted onto the existing Vortex code: what was reused, extended and built new.
