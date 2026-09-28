@@ -50,6 +50,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/transactions", get(program_transactions))
         .route("/api/incidents", get(list_incidents))
         .route("/api/incidents/{id}", get(get_incident).patch(update_incident))
+        .route("/api/incidents/{id}/timeline", get(incident_timeline))
         .route("/api/transactions/{signature}", get(get_transaction))
         .route("/api/rules", get(list_rules).post(create_rule))
         .route("/api/rules/{id}", axum::routing::patch(update_rule).delete(delete_rule))
@@ -149,6 +150,11 @@ async fn get_incident(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResu
     })))
 }
 
+async fn incident_timeline(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    let incident = s.store.incident(id)?.ok_or_else(|| not_found("incident"))?;
+    Ok(Json(s.incident_timeline(&incident).unwrap_or(Value::Null)))
+}
+
 #[derive(Deserialize)]
 struct UpdateIncident {
     status: IncidentStatus,
@@ -172,7 +178,7 @@ async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> 
         )
     })?;
     let labels = s.program_labels();
-    let trace = trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices).await;
+    let trace = trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices, Some(&s.idls)).await;
     let programs: Vec<&String> = labels.keys().filter(|p| tx.touches(p)).collect();
     Ok(Json(json!({
         "transaction": tx,

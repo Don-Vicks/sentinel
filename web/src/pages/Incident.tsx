@@ -4,17 +4,20 @@ import { ArrowLeft, CheckCircle2, Search } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import type { Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
-import { clock, compact, duration, KIND_LABEL, num, pct, short } from '../lib/format';
+import { clock, compact, duration, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { ShareBar } from '../components/charts';
 import { Empty, ErrorState, PageSkeleton, Panel, SeverityBadge, Spinner, Stat, StatusBadge } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
+import { IncidentTimeline } from '../components/IncidentTimeline';
 
 function fmtMetric(metric: string | null, v: number | null) {
   if (v === null) return '—';
   if (metric === 'failure_rate') return pct(v);
   if (metric === 'tps') return `${v.toFixed(2)} TPS`;
   if (metric === 'avg_compute') return `${compact(v)} CU`;
+  if (metric === 'error_count') return `${compact(v)} / 60s`;
+  if (metric === 'transfer_usd') return usd(v) ?? '—';
   return compact(v);
 }
 
@@ -110,6 +113,8 @@ export function Incident() {
           sub={inc.detection_latency_ms !== null ? `detected ${(inc.detection_latency_ms / 1000).toFixed(2)}s after last tx` : undefined}
         />
       </div>
+
+      <IncidentTimeline incident={inc} />
 
       {fps.length > 0 && (
         <Panel title="Failure fingerprints">

@@ -3,7 +3,8 @@
 //! turns what fires into incidents linked to the transactions behind them.
 
 use crate::alerts::{Alert, Dispatcher};
-use crate::analyze::{fingerprint, summarize, symbol_for};
+use crate::analyze::{fingerprint_with, summarize, symbol_for};
+use crate::idl::IdlRegistry;
 use crate::detect::{self, Detection};
 use crate::live::{ErrorCount, IncidentChange, InstructionStat, LiveEvent, ProgramSnapshot, StreamHealth};
 use crate::metrics::Window;
@@ -38,6 +39,7 @@ pub struct Sentinel {
     pub rpc: Option<Arc<RpcClient>>,
     pub owners: OwnerCache,
     pub prices: Arc<PriceBook>,
+    pub idls: Arc<IdlRegistry>,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
     dispatcher: Dispatcher,
@@ -152,11 +154,13 @@ impl Sentinel {
             inc.summary = format!("{} (closed on restart)", inc.summary);
             store.update_incident(&inc)?;
         }
+        let idls = IdlRegistry::new(rpc.clone());
         let this = Arc::new(Self {
             store,
             source,
             rpc,
             owners: OwnerCache::default(),
+            idls,
             prices,
             live,
             public_url,
@@ -167,8 +171,17 @@ impl Sentinel {
         Ok(this)
     }
 
+    /// Fetches IDLs for monitored programs; needs a runtime, so it runs from `run`.
+    fn request_program_idls(&self) {
+        let ids: Vec<String> = self.state.lock().unwrap().programs.keys().cloned().collect();
+        for id in ids {
+            self.idls.request(&id);
+        }
+    }
+
     /// Runs the ingest loop and the 1-second evaluation tick until the source closes.
     pub async fn run(self: Arc<Self>) {
+        self.request_program_idls();
         let mut rx = self.source.subscribe();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -233,9 +246,13 @@ impl Sentinel {
                 }
                 noted = true;
             }
-            let summary = summarize(&tx, &pid, &self.prices);
-            let fp = fingerprint(&tx);
+            let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+            let fp = fingerprint_with(&tx, Some(&self.idls));
             if let Some(fp) = &fp {
+                if !ps.fingerprints.contains_key(&fp.key()) {
+                    // Name future occurrences from the raising program's IDL.
+                    self.idls.request(&fp.program_id);
+                }
                 ps.fingerprints.entry(fp.key()).or_insert_with(|| fp.clone());
                 ps.fingerprint_first_seen.entry(fp.key()).or_insert(second);
             }
@@ -392,21 +409,27 @@ impl Sentinel {
                 }
             }
 
-            // Error-type spikes. A failure-spike incident already breaks
-            // failures down by fingerprint, so don't open duplicates alongside it.
+            // Error-type spikes. An open failure-spike incident already breaks
+            // down the errors it contains, so a surge of one of those isn't
+            // opened twice. A brand-new error always gets its own incident.
             let labels = program_labels_one(&ps.program);
             let spikes = {
                 let fps = &ps.fingerprints;
                 let describe = |key: &str| describe_fingerprint(fps.get(key), key, &labels);
                 detect::error_spikes(&ps.window, &cfg, now, &ps.fingerprint_first_seen, &describe)
             };
-            let failure_open = ps.open.contains_key(IncidentKind::FailureSpike.as_str());
+            let explained: HashSet<String> = ps
+                .open
+                .get(IncidentKind::FailureSpike.as_str())
+                .map(|o| o.fingerprint_counts.keys().cloned().collect())
+                .unwrap_or_default();
             let mut firing: HashSet<String> = HashSet::new();
             for spike in spikes {
                 let key = format!("{ERROR_SPIKE_PREFIX}{}", spike.key);
                 let already = ps.open.contains_key(&key);
                 let open_count = ps.open.keys().filter(|k| k.starts_with(ERROR_SPIKE_PREFIX)).count();
-                if !already && (failure_open || open_count >= MAX_OPEN_ERROR_SPIKES) {
+                let duplicate = !spike.new && explained.contains(&spike.key);
+                if !already && (duplicate || open_count >= MAX_OPEN_ERROR_SPIKES) {
                     continue;
                 }
                 firing.insert(key.clone());
@@ -646,9 +669,14 @@ impl Sentinel {
         }
     }
 
-    fn resolve(&self, ps: &mut ProgramState, key: &str, _now: i64) {
+    fn resolve(&self, ps: &mut ProgramState, key: &str, now: i64) {
         let Some(mut open) = ps.open.remove(key) else { return };
         refresh_evidence(&mut open, &ps.fingerprints, &program_labels_one(&ps.program));
+        // Keep the metric history around the incident once it leaves the
+        // in-memory window.
+        if let Some(t) = timeline(ps, &open.incident, now) {
+            open.incident.evidence["timeline"] = serde_json::to_value(t).unwrap_or_default();
+        }
         let inc = &mut open.incident;
         // A human may have marked it resolved already; keep their timestamp.
         if inc.status != IncidentStatus::Resolved {
@@ -929,6 +957,20 @@ impl Sentinel {
         }))
     }
 
+    /// Metric history around an incident: live from the rolling window when
+    /// it still covers the period, otherwise the copy stored at resolution.
+    pub fn incident_timeline(&self, incident: &Incident) -> Option<serde_json::Value> {
+        let state = self.state.lock().unwrap();
+        let live = state
+            .programs
+            .get(&incident.program_id)
+            .and_then(|ps| timeline(ps, incident, Utc::now().timestamp()));
+        match live {
+            Some(t) => serde_json::to_value(t).ok(),
+            None => incident.evidence.get("timeline").cloned(),
+        }
+    }
+
     pub fn recent_transactions(&self, program_id: &str, failed_only: bool, limit: usize) -> Vec<TxSummary> {
         let state = self.state.lock().unwrap();
         state
@@ -998,6 +1040,7 @@ impl Sentinel {
             program
         };
         self.sync_filters();
+        self.idls.request(&program.program_id);
         Ok(program)
     }
 
@@ -1333,4 +1376,96 @@ fn fmt_metric(metric: Metric, v: f64) -> String {
         Metric::Tps => format!("{v:.2}"),
         _ => format!("{v:.0}"),
     }
+}
+
+const TIMELINE_BUCKET: i64 = 10;
+const TIMELINE_LEAD: i64 = 300;
+const TIMELINE_TAIL: i64 = 120;
+
+#[derive(serde::Serialize)]
+pub struct Timeline {
+    pub bucket_secs: i64,
+    pub start: i64,
+    pub end: i64,
+    pub onset: Option<i64>,
+    pub detected: i64,
+    pub resolved: Option<i64>,
+    pub fingerprints: Vec<TimelineSeries>,
+    pub points: Vec<TimelinePoint>,
+}
+
+#[derive(serde::Serialize)]
+pub struct TimelineSeries {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct TimelinePoint {
+    pub t: i64,
+    pub tx: u64,
+    pub failed: u64,
+    pub failure_rate: f64,
+    pub tps: f64,
+    pub avg_cu: f64,
+    /// Occurrences of each series in `fingerprints`, same order.
+    pub errors: Vec<u64>,
+}
+
+fn timeline(ps: &ProgramState, inc: &Incident, now: i64) -> Option<Timeline> {
+    let w = &ps.window;
+    let first = w.first_second?;
+    let anchor = inc.onset_at.unwrap_or(inc.detected_at).timestamp();
+    let floor = (now - crate::metrics::HISTORY_SECS + 1).max(first);
+    let start = (anchor - TIMELINE_LEAD).max(floor);
+    let end = inc
+        .resolved_at
+        .map(|r| r.timestamp() + TIMELINE_TAIL)
+        .unwrap_or(now)
+        .min(now);
+    // The window no longer covers the incident's start: nothing live to show.
+    if anchor < floor || end <= start {
+        return None;
+    }
+    let labels = program_labels_one(&ps.program);
+    let fingerprints: Vec<TimelineSeries> = inc.evidence["fingerprints"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f["key"].as_str())
+        .take(3)
+        .map(|key| TimelineSeries {
+            key: key.to_string(),
+            label: describe_fingerprint(ps.fingerprints.get(key), key, &labels),
+        })
+        .collect();
+    let start = start - start.rem_euclid(TIMELINE_BUCKET);
+    let points = (start..end)
+        .step_by(TIMELINE_BUCKET as usize)
+        .map(|t| {
+            let s = w.stats(now, now - t, (now - t - TIMELINE_BUCKET).max(0));
+            TimelinePoint {
+                t,
+                tx: s.tx,
+                failed: s.failed,
+                failure_rate: s.failure_rate(),
+                tps: s.tx as f64 / TIMELINE_BUCKET as f64,
+                avg_cu: s.avg_cu(),
+                errors: fingerprints
+                    .iter()
+                    .map(|f| s.fingerprints.get(&f.key).copied().unwrap_or(0))
+                    .collect(),
+            }
+        })
+        .collect();
+    Some(Timeline {
+        bucket_secs: TIMELINE_BUCKET,
+        start,
+        end,
+        onset: inc.onset_at.map(|t| t.timestamp()),
+        detected: inc.detected_at.timestamp(),
+        resolved: inc.resolved_at.map(|t| t.timestamp()),
+        fingerprints,
+        points,
+    })
 }

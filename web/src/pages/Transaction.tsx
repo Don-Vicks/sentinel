@@ -77,6 +77,7 @@ export function Transaction() {
   const tx = data.transaction;
   const trace = data.trace;
   const parties = new Map(trace.parties.map((p) => [p.address, p]));
+  const decodedByPath = new Map(trace.decoded.map((d) => [d.path, d]));
   const labelOf = (a: string) => parties.get(a)?.label ?? short(a);
   const topTotal = trace.call_tree.filter((n) => n.depth === 1).reduce((s, n) => s + (n.compute_consumed ?? 0), 0);
   const priorityFee =
@@ -122,7 +123,17 @@ export function Transaction() {
       {tx.error && (
         <div className="panel border-crit/40 p-4">
           <h2 className="panel-title text-crit">Error</h2>
-          <p className="mt-1 font-medium">{tx.error.name ?? tx.error.message}</p>
+          <p className="mt-1 font-medium">
+            {trace.error_detail?.name ?? tx.error.name ?? tx.error.message}
+            {(trace.error_detail?.code ?? tx.error.custom_code) != null && (
+              <span className="ml-1.5 num text-xs text-ink-3">#{trace.error_detail?.code ?? tx.error.custom_code}</span>
+            )}
+          </p>
+          {trace.error_detail?.message && (
+            <p className="mt-1 text-ink-2">
+              {trace.error_detail.message} <span className="text-xs text-ink-3">(from the program's IDL)</span>
+            </p>
+          )}
           <p className="mt-1 font-mono text-xs text-ink-2 break-all">{tx.error.message}</p>
         </div>
       )}
@@ -219,9 +230,11 @@ export function Transaction() {
         </div>
       </Panel>
 
-      <Panel title="Instructions">
+      <Panel title={trace.decoded.length ? 'Instructions (decoded with on-chain IDLs)' : 'Instructions'}>
         <ul className="divide-y divide-line">
-          {tx.instructions.map((ix) => (
+          {tx.instructions.map((ix) => {
+            const dec = decodedByPath.get(ix.path);
+            return (
             <li key={ix.path}>
               <details className="group">
                 <summary className="flex cursor-pointer items-center gap-3 px-4 py-2 hover:bg-sunken list-none">
@@ -229,20 +242,49 @@ export function Transaction() {
                   <span className="font-medium truncate" style={{ paddingLeft: `${(ix.stack_height - 1) * 16}px` }}>
                     {ix.program_name ?? data.program_labels[ix.program_id] ?? short(ix.program_id)}
                   </span>
-                  <span className="text-ink-2 truncate">{ix.name ?? ''}</span>
+                  <span className="text-ink-2 truncate">{dec?.name ?? ix.name ?? ''}</span>
                   <span className="ml-auto text-xs text-ink-3">{ix.accounts.length} accounts</span>
                 </summary>
                 <div className="px-4 pb-3 pl-16 space-y-2 text-xs">
                   <div><span className="text-ink-3">Program </span><Address value={ix.program_id} n={8} /></div>
-                  {ix.parsed != null && <pre className="rounded bg-sunken p-2 overflow-x-auto">{JSON.stringify(ix.parsed, null, 2)}</pre>}
-                  <div className="font-mono break-all text-ink-2"><span className="text-ink-3 font-sans">Data </span>{ix.data || '—'}</div>
-                  <ol className="list-decimal list-inside font-mono text-ink-2 space-y-0.5">
-                    {ix.accounts.map((a, i) => <li key={i}>{a}</li>)}
-                  </ol>
+                  {dec ? (
+                    <>
+                      {Object.keys(dec.args).length > 0 && (
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 rounded bg-sunken p-2">
+                          {Object.entries(dec.args).map(([k, v]) => (
+                            <div key={k} className="contents">
+                              <dt className="text-ink-3">{k}</dt>
+                              <dd className="font-mono break-all">{typeof v === 'object' ? JSON.stringify(v) : String(v)}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {dec.partial && <p className="text-warn">Some arguments could not be decoded.</p>}
+                      <table className="w-full">
+                        <tbody>
+                          {dec.accounts.map((a, i) => (
+                            <tr key={i}>
+                              <td className="pr-3 py-0.5 text-ink-3 whitespace-nowrap align-top">{a.name}</td>
+                              <td className="py-0.5 font-mono text-ink-2 break-all">{a.pubkey}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </>
+                  ) : (
+                    <>
+                      {ix.parsed != null && <pre className="rounded bg-sunken p-2 overflow-x-auto">{JSON.stringify(ix.parsed, null, 2)}</pre>}
+                      <div className="font-mono break-all text-ink-2"><span className="text-ink-3 font-sans">Data </span>{ix.data || '—'}</div>
+                      <ol className="list-decimal list-inside font-mono text-ink-2 space-y-0.5">
+                        {ix.accounts.map((a, i) => <li key={i}>{a}</li>)}
+                      </ol>
+                    </>
+                  )}
                 </div>
               </details>
             </li>
-          ))}
+            );
+          })}
         </ul>
       </Panel>
 

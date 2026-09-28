@@ -5667,6 +5667,7 @@ dependencies = [
  "bs58 0.5.1",
  "chrono",
  "dotenv",
+ "flate2",
  "futures-util",
  "reqwest",
  "rusqlite",

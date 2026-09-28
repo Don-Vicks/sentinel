@@ -64,6 +64,7 @@ export const KIND_LABEL: Record<string, string> = {
   compute_spike: 'Compute spike',
   large_transfer: 'Large transfer',
   rule_triggered: 'Rule triggered',
+  error_spike: 'Error spike',
 };
 
 export const explorer = (sig: string) => `https://solscan.io/tx/${sig}`;

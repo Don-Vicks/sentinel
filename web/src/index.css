@@ -26,6 +26,8 @@
   --color-series-ok: #8a8983;
   --color-series-fail: #d03b3b;
   --color-series-1: #2a78d6;
+  --color-series-2: #eb6834;
+  --color-series-3: #1baf7a;
 
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
@@ -56,6 +58,8 @@
     --color-series-ok: #6d6c66;
     --color-series-fail: #e66767;
     --color-series-1: #3987e5;
+    --color-series-2: #d95926;
+    --color-series-3: #199e70;
     color-scheme: dark;
   }
 }

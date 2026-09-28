@@ -1,6 +1,7 @@
 //! Per-transaction interpretation: failure fingerprints and feed summaries.
 
 use crate::model::{Fingerprint, LargestTransfer, TxSummary};
+use crate::idl::IdlRegistry;
 use crate::pricing::PriceBook;
 use vortex::events::{programs, TransferKind, VortexTransaction};
 
@@ -8,6 +9,12 @@ use vortex::events::{programs, TransferKind, VortexTransaction};
 /// log-derived call tree, so a failure inside a CPI is attributed to the
 /// program that actually raised it.
 pub fn fingerprint(tx: &VortexTransaction) -> Option<Fingerprint> {
+    fingerprint_with(tx, None)
+}
+
+/// Like [`fingerprint`], naming bare custom error codes from the raising
+/// program's Anchor IDL when it has already been fetched.
+pub fn fingerprint_with(tx: &VortexTransaction, idls: Option<&IdlRegistry>) -> Option<Fingerprint> {
     let err = tx.error.as_ref()?;
     let origin = tx
         .invocations
@@ -20,9 +27,17 @@ pub fn fingerprint(tx: &VortexTransaction) -> Option<Fingerprint> {
         .or_else(|| err.program_id.clone())
         .unwrap_or_else(|| "runtime".to_string());
     let instruction = origin.and_then(|inv| inv.instruction.clone());
+    let from_idl = || {
+        let code = err.custom_code?;
+        let idl = idls?.cached(&program_id)?;
+        Some(idl.error(code)?.name.clone())
+    };
     let error = err
         .name
         .clone()
+        .filter(|n| !n.starts_with("Custom("))
+        .or_else(from_idl)
+        .or_else(|| err.name.clone())
         .or_else(|| origin.and_then(|inv| inv.failure.clone()))
         .unwrap_or_else(|| err.message.clone());
 
@@ -51,7 +66,13 @@ pub fn short(key: &str) -> String {
     }
 }
 
-pub fn summarize(tx: &VortexTransaction, program_id: &str, prices: &PriceBook) -> TxSummary {
+pub fn summarize(
+    tx: &VortexTransaction,
+    program_id: &str,
+    prices: &PriceBook,
+    idls: Option<&IdlRegistry>,
+) -> TxSummary {
+    let fp = fingerprint_with(tx, idls);
     let mut instructions: Vec<String> = tx
         .instruction_names_for(program_id)
         .map(str::to_string)
@@ -89,8 +110,8 @@ pub fn summarize(tx: &VortexTransaction, program_id: &str, prices: &PriceBook) -
         slot: tx.slot,
         received_at: tx.received_at,
         success: tx.success,
-        error: tx.error.as_ref().and_then(|e| e.name.clone()),
-        fingerprint: fingerprint(tx).map(|f| f.key()),
+        error: fp.as_ref().map(|f| f.error.clone()),
+        fingerprint: fp.as_ref().map(Fingerprint::key),
         compute_units: tx.compute_for(program_id),
         fee: tx.fee,
         fee_payer: tx.fee_payer().map(str::to_string),

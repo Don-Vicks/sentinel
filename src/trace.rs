@@ -4,6 +4,7 @@
 //! and PDAs are labelled by the program that controls them.
 
 use crate::analyze::{short, symbol_for};
+use crate::idl::{DecodedInstruction, IdlError, IdlRegistry};
 use crate::pricing::PriceBook;
 use serde::Serialize;
 use solana_client::nonblocking::rpc_client::RpcClient;
@@ -23,6 +24,19 @@ pub struct Trace {
     pub narrative: Vec<String>,
     /// Transfers in a failed transaction executed and were then rolled back.
     pub reverted: bool,
+    /// Instructions decoded with the program's on-chain Anchor IDL.
+    pub decoded: Vec<DecodedView>,
+    /// The failing program's own description of a custom error code.
+    pub error_detail: Option<IdlError>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DecodedView {
+    pub path: String,
+    pub program_id: String,
+    pub idl_name: Option<String>,
+    #[serde(flatten)]
+    pub instruction: DecodedInstruction,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,7 +147,12 @@ pub async fn build(
     rpc: Option<&RpcClient>,
     cache: &OwnerCache,
     prices: &PriceBook,
+    idls: Option<&std::sync::Arc<IdlRegistry>>,
 ) -> Trace {
+    let (decoded, error_detail) = match idls {
+        Some(idls) => decode_with_idls(tx, idls).await,
+        None => (vec![], None),
+    };
     let flows: Vec<Flow> = tx
         .transfers
         .iter()
@@ -214,7 +233,68 @@ pub async fn build(
         call_tree,
         narrative,
         reverted: !tx.success && !tx.transfers.is_empty(),
+        decoded,
+        error_detail,
     }
+}
+
+async fn decode_with_idls(
+    tx: &VortexTransaction,
+    idls: &std::sync::Arc<IdlRegistry>,
+) -> (Vec<DecodedView>, Option<IdlError>) {
+    // Native programs have no Anchor IDL; skip the lookups.
+    let mut programs: Vec<&str> = tx
+        .instructions
+        .iter()
+        .map(|i| i.program_id.as_str())
+        .filter(|p| !is_native(p))
+        .collect();
+    programs.sort();
+    programs.dedup();
+    let fetched = futures_util::future::join_all(programs.iter().map(|p| idls.get(p))).await;
+    let by_program: HashMap<&str, _> = programs
+        .iter()
+        .zip(fetched)
+        .filter_map(|(p, idl)| Some((*p, idl?)))
+        .collect();
+
+    let decoded = tx
+        .instructions
+        .iter()
+        .filter_map(|ix| {
+            let idl = by_program.get(ix.program_id.as_str())?;
+            let data = bs58::decode(&ix.data).into_vec().ok()?;
+            Some(DecodedView {
+                path: ix.path.clone(),
+                program_id: ix.program_id.clone(),
+                idl_name: idl.name.clone(),
+                instruction: idl.decode_instruction(&data, &ix.accounts)?,
+            })
+        })
+        .collect();
+
+    let error_detail = crate::analyze::fingerprint(tx).and_then(|fp| {
+        let code = fp.code?;
+        let idl = by_program.get(fp.program_id.as_str())?;
+        idl.error(code).cloned()
+    });
+    (decoded, error_detail)
+}
+
+fn is_native(program: &str) -> bool {
+    matches!(
+        program,
+        programs::SYSTEM_PROGRAM
+            | programs::TOKEN_PROGRAM
+            | programs::TOKEN_2022_PROGRAM
+            | programs::COMPUTE_BUDGET_PROGRAM
+            | "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+            | "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
+            | "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo"
+            | "Stake11111111111111111111111111111111111111"
+            | "Vote111111111111111111111111111111111111111"
+            | "AddressLookupTab1e1111111111111111111111111"
+    )
 }
 
 fn party(

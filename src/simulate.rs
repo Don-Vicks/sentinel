@@ -1,7 +1,8 @@
 //! Development-only traffic generator. Publishes synthetic transactions into
 //! the Vortex hub so the full Sentinel pipeline can be exercised without a
 //! gRPC key. Enabled with `SENTINEL_SIMULATE=<program_id>`; never on by default.
-//! Every 4 minutes it injects a 60s slippage-failure burst.
+//! Every 4 minutes it injects a 60s slippage-failure burst, and between
+//! bursts a small wave of a new error type.
 
 use chrono::Utc;
 use std::sync::Arc;
@@ -30,15 +31,22 @@ pub fn spawn(hub: Arc<VortexHub>, program: String) {
             n += 1;
             let elapsed = Utc::now().timestamp() - started;
             let burst = elapsed > 180 && (elapsed - 180) % 240 < 60;
+            let new_error_wave = elapsed > 180 && (elapsed - 180) % 240 >= 150 && (elapsed - 180) % 240 < 210;
             let seed = n.wrapping_mul(2654435761) % 1000;
             let fail = if burst { seed < 450 } else { seed < 25 };
+            let account_error = !fail && new_error_wave && seed % 40 == 1;
             hub.record_slot(300_000_000 + n / 3);
-            hub.publish(Arc::new(tx(&program, n, fail, seed)));
+            hub.publish(Arc::new(tx(&program, n, fail || account_error, seed, account_error)));
         }
     });
 }
 
-fn tx(program: &str, n: u64, fail: bool, seed: u64) -> VortexTransaction {
+fn tx(program: &str, n: u64, fail: bool, seed: u64, account_error: bool) -> VortexTransaction {
+    let (err_name, err_code, err_hex) = if account_error {
+        ("AccountNotInitialized", 3012u32, "0xbc4")
+    } else {
+        ("TooLittleSolReceived", 6003u32, "0x1773")
+    };
     let buy = seed % 2 == 0;
     let signer = key("Trader", seed % 180);
     let curve = key("Curve", 7);
@@ -72,16 +80,16 @@ fn tx(program: &str, n: u64, fail: bool, seed: u64) -> VortexTransaction {
             compute_consumed: Some(cu),
             compute_budget: Some(200_000),
             success: Some(!fail),
-            failure: fail.then(|| "custom program error: 0x1773".into()),
+            failure: fail.then(|| format!("custom program error: {err_hex}")),
             ..Default::default()
         },
     ];
     let mut transfers = vec![];
     let mut balances = vec![];
     if fail {
-        logs.push("Program log: AnchorError thrown in programs/pump/src/lib.rs:512. Error Code: TooLittleSolReceived. Error Number: 6003. Error Message: Slippage: Too little SOL received to sell the given amount of tokens..".into());
+        logs.push(format!("Program log: AnchorError caused by account: bonding_curve. Error Code: {err_name}. Error Number: {err_code}. Error Message: see IDL."));
         logs.push(format!("Program {program} consumed {cu} of 199850 compute units"));
-        logs.push(format!("Program {program} failed: custom program error: 0x1773"));
+        logs.push(format!("Program {program} failed: custom program error: {err_hex}"));
     } else {
         logs.push(format!("Program {token} invoke [2]"));
         logs.push("Program log: Instruction: Transfer".into());
@@ -191,11 +199,11 @@ fn tx(program: &str, n: u64, fail: bool, seed: u64) -> VortexTransaction {
         received_at: Utc::now(),
         success: !fail,
         error: fail.then(|| TxError {
-            message: "InstructionError(1, Custom(6003))".into(),
+            message: format!("InstructionError(1, Custom({err_code}))"),
             instruction_index: Some(1),
-            custom_code: Some(6003),
+            custom_code: Some(err_code),
             program_id: Some(program.into()),
-            name: Some("TooLittleSolReceived".into()),
+            name: Some(err_name.into()),
             class: "Unknown".into(),
         }),
         fee: 5000 + seed * 40,

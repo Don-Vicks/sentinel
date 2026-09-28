@@ -164,6 +164,12 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
     }
     let resolved = store.incident(inc.id).unwrap().unwrap();
     assert_eq!(resolved.status, IncidentStatus::Resolved);
+    // The metric history around it is kept with the incident.
+    let points = resolved.evidence["timeline"]["points"].as_array().expect("timeline stored");
+    let peak = points.iter().filter_map(|p| p["failure_rate"].as_f64()).fold(0.0, f64::max);
+    assert!(peak >= 50.0, "timeline shows the spike, peak {peak}");
+    assert!(points.first().unwrap()["failure_rate"].as_f64().unwrap() < 10.0, "and the calm before it");
+    assert_eq!(resolved.evidence["timeline"]["fingerprints"][0]["label"], "TooLittleSolReceived in Pump.fun::Sell (#6003)");
 
     // A second spike is judged against a baseline that excludes the first.
     for sec in t0 + 600..t0 + 630 {
@@ -248,5 +254,45 @@ async fn new_error_type_opens_incident_while_failure_rate_is_flat() {
     let linked = store.incident_transactions(inc.id, 100).unwrap();
     assert!(!linked.is_empty());
     assert!(linked.iter().all(|t| t.error.as_deref() == Some("AccountNotInitialized")));
+    let _ = std::fs::remove_file(&dir);
+}
+
+#[tokio::test]
+async fn new_error_during_failure_spike_still_opens_incident() {
+    let dir = std::env::temp_dir().join(format!("sentinel-errspike2-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(16);
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
+    s.add_program(PROGRAM.into(), None).unwrap();
+    let t0 = 1_700_000_000i64;
+    let mut n = 0;
+    for sec in t0..t0 + 300 {
+        for _ in 0..5 {
+            n += 1;
+            s.on_transaction(tx(n, sec, n % 50 != 0));
+        }
+        s.on_tick(sec + 1);
+    }
+    // Slippage storm (failure spike) with a new error mixed in.
+    for sec in t0 + 300..t0 + 360 {
+        for i in 0..5 {
+            n += 1;
+            // 3 of 5 fail; every 5s one of them is the new error.
+            let t = tx(n, sec, i >= 3);
+            s.on_transaction(if sec % 5 == 0 && i == 0 { with_error(t, "AccountNotInitialized", 3012) } else { t });
+        }
+        s.on_tick(sec + 1);
+    }
+    let incidents = store.incidents(Some(PROGRAM), 10).unwrap();
+    assert!(incidents.iter().any(|i| i.kind == IncidentKind::FailureSpike));
+    assert!(
+        incidents.iter().any(|i| i.kind == IncidentKind::ErrorSpike && i.summary.contains("AccountNotInitialized")),
+        "new error surfaced separately"
+    );
+    assert!(
+        !incidents.iter().any(|i| i.kind == IncidentKind::ErrorSpike && i.summary.contains("TooLittleSolReceived")),
+        "the storm's own error isn't duplicated"
+    );
     let _ = std::fs::remove_file(&dir);
 }

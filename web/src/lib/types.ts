@@ -6,7 +6,8 @@ export type IncidentKind =
   | 'activity_drop'
   | 'compute_spike'
   | 'large_transfer'
-  | 'rule_triggered';
+  | 'rule_triggered'
+  | 'error_spike';
 export type Health = 'healthy' | 'degraded' | 'critical' | 'warming_up' | 'idle';
 
 export interface LargestTransfer {
@@ -49,6 +50,34 @@ export interface ErrorCount {
   share: number;
 }
 
+export interface InstructionStat {
+  name: string;
+  tx: number;
+  failed: number;
+  failure_rate: number;
+  avg_cu: number;
+  share: number;
+}
+
+export interface Timeline {
+  bucket_secs: number;
+  start: number;
+  end: number;
+  onset: number | null;
+  detected: number;
+  resolved: number | null;
+  fingerprints: { key: string; label: string }[];
+  points: {
+    t: number;
+    tx: number;
+    failed: number;
+    failure_rate: number;
+    tps: number;
+    avg_cu: number;
+    errors: number[];
+  }[];
+}
+
 export interface ProgramSnapshot {
   program_id: string;
   label: string;
@@ -70,6 +99,7 @@ export interface ProgramSnapshot {
   baseline_tps: number;
   baseline_avg_cu: number;
   top_errors: ErrorCount[];
+  instructions: InstructionStat[];
   open_incidents: number;
   last_tx_at: string | null;
   point: SeriesPoint | null;
@@ -281,6 +311,18 @@ export interface Trace {
   call_tree: CallNode[];
   narrative: string[];
   reverted: boolean;
+  decoded: DecodedView[];
+  error_detail: { code: number; name: string; message: string | null } | null;
+}
+
+export interface DecodedView {
+  path: string;
+  program_id: string;
+  idl_name: string | null;
+  name: string;
+  args: Record<string, unknown>;
+  accounts: { name: string; pubkey: string }[];
+  partial: boolean;
 }
 
 export interface TransactionDetail {

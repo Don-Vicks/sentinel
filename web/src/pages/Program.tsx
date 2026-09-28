@@ -137,6 +137,44 @@ export function Program() {
         </Panel>
       </div>
 
+      <Panel title="Instructions (last 5 min)">
+        {s.instructions.length === 0 ? (
+          <Empty title="No instructions yet" />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Instruction</th>
+                  <th className="w-1/4">Share of transactions</th>
+                  <th className="text-right">Transactions</th>
+                  <th className="text-right">Failure rate</th>
+                  <th className="text-right">Avg compute</th>
+                </tr>
+              </thead>
+              <tbody>
+                {s.instructions.map((ix) => (
+                  <tr key={ix.name}>
+                    <td className="font-medium">{ix.name}</td>
+                    <td>
+                      <div className="flex items-center gap-2">
+                        <ShareBar share={ix.share} tone="accent" />
+                        <span className="num text-xs w-10 text-right">{(ix.share * 100).toFixed(0)}%</span>
+                      </div>
+                    </td>
+                    <td className="num text-right">{num(ix.tx)}</td>
+                    <td className={`num text-right ${ix.failure_rate >= Math.max(10, s.baseline_failure_rate * 2) && ix.tx >= 10 ? 'text-crit font-medium' : ''}`}>
+                      {pct(ix.failure_rate)}
+                    </td>
+                    <td className="num text-right">{compact(ix.avg_cu)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
       <Panel title="Why transactions fail (last 60s)">
         {s.top_errors.length === 0 ? (
           <Empty title="No failures in the last minute" />
