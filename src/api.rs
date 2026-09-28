@@ -162,11 +162,11 @@ async fn update_incident(
 }
 
 async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> ApiResult<Value> {
-    let tx = s.transaction(&sig).ok_or_else(|| {
+    let tx = s.transaction(&sig).await?.ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
-            "Transaction is not in Sentinel's window. Only recent transactions and those linked \
-             to incidents are kept."
+            "Transaction not found. It isn't in Sentinel's live window or an incident, and the \
+             RPC doesn't have it (or SOLANA_RPC_URL isn't set)."
                 .into(),
         )
     })?;

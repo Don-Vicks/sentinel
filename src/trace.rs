@@ -198,7 +198,7 @@ pub async fn build(
     let balance_changes = balance_changes(tx);
     let state_changes = state_changes(tx);
     let call_tree = call_tree(&tx.invocations, monitored);
-    let narrative = narrative(tx, &flows, &call_tree, &name);
+    let narrative = narrative(tx, &flows, &call_tree, monitored, &name);
 
     Trace {
         parties,
@@ -391,6 +391,7 @@ fn narrative(
     tx: &VortexTransaction,
     flows: &[Flow],
     calls: &[CallNode],
+    monitored: &HashMap<String, String>,
     name: &dyn Fn(&str) -> String,
 ) -> Vec<String> {
     let mut lines = Vec::new();
@@ -405,6 +406,23 @@ fn narrative(
         .collect();
     if !top.is_empty() {
         lines.push(format!("{payer} called {}.", top.join(", then ")));
+    }
+    // Programs are often reached through a router; name the monitored ones.
+    let mut via: Vec<String> = calls
+        .iter()
+        .filter(|c| c.depth > 1 && monitored.contains_key(&c.program_id))
+        .map(|c| match &c.instruction {
+            Some(ix) => format!("{}::{}", c.program_name.as_deref().unwrap_or("?"), ix),
+            None => c.program_name.clone().unwrap_or_default(),
+        })
+        .collect();
+    via.dedup();
+    // Anchor event self-CPIs carry no instruction name; drop them when the
+    // same program already appears with one.
+    let named: Vec<String> = via.iter().filter_map(|v| v.split_once("::").map(|(p, _)| p.to_string())).collect();
+    via.retain(|v| v.contains("::") || !named.contains(v));
+    if !via.is_empty() {
+        lines.push(format!("That invoked {} via CPI.", via.join(", ")));
     }
 
     for f in flows.iter().take(8) {

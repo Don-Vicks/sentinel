@@ -839,11 +839,19 @@ impl Sentinel {
             .unwrap_or_default()
     }
 
-    pub fn transaction(&self, signature: &str) -> Option<Arc<VortexTransaction>> {
+    /// Looks in the live window, then incident snapshots, then fetches it
+    /// through RPC and the same Vortex decoder.
+    pub async fn transaction(&self, signature: &str) -> Result<Option<Arc<VortexTransaction>>> {
         if let Some(tx) = self.state.lock().unwrap().tx_index.get(signature) {
-            return Some(tx.clone());
+            return Ok(Some(tx.clone()));
         }
-        self.store.stored_transaction(signature).ok().flatten().map(Arc::new)
+        if let Some(tx) = self.store.stored_transaction(signature)? {
+            return Ok(Some(Arc::new(tx)));
+        }
+        let Some(rpc) = &self.rpc else { return Ok(None) };
+        Ok(vortex::geyser::rpc_frame::fetch_transaction(&rpc.url(), signature)
+            .await?
+            .map(Arc::new))
     }
 
     pub fn program_labels(&self) -> HashMap<String, String> {

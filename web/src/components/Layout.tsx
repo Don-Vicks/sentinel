@@ -1,5 +1,6 @@
-import { NavLink, Outlet } from 'react-router';
-import { Activity, Bell, LayoutGrid, Siren } from 'lucide-react';
+import { useState } from 'react';
+import { NavLink, Outlet, useNavigate } from 'react-router';
+import { Activity, Bell, LayoutGrid, Search, Siren } from 'lucide-react';
 import { usePrograms } from '../lib/programs';
 import { useLiveStatus } from '../lib/live';
 import { HealthDot } from './ui';
@@ -47,6 +48,37 @@ function StreamPanel() {
   );
 }
 
+function TxSearch() {
+  const navigate = useNavigate();
+  const [sig, setSig] = useState('');
+  return (
+    <form
+      role="search"
+      className="relative px-2 mt-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        const v = sig.trim();
+        if (v) {
+          navigate(`/tx/${v}`);
+          setSig('');
+        }
+      }}
+    >
+      <label htmlFor="tx-search" className="sr-only">Investigate a transaction signature</label>
+      <Search className="absolute left-4.5 top-2.5 size-4 text-ink-3" aria-hidden />
+      <input
+        id="tx-search"
+        className="input pl-8 font-mono text-xs"
+        placeholder="Investigate a signature"
+        value={sig}
+        onChange={(e) => setSig(e.target.value)}
+        autoComplete="off"
+        spellCheck={false}
+      />
+    </form>
+  );
+}
+
 export function Layout() {
   const { programs } = usePrograms();
   return (
@@ -69,6 +101,7 @@ export function Layout() {
             </NavLink>
           ))}
         </nav>
+        <TxSearch />
         <div className="hidden lg:flex flex-col min-h-0 flex-1 mt-5">
           <div className="px-4 mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Programs</div>
           <div className="px-2 overflow-y-auto flex-1 space-y-0.5">

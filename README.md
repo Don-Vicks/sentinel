@@ -33,7 +33,7 @@ Dashboard (live over SSE)
 
   Seconds inside an open incident are left out of later baselines, so one incident doesn't mask the next.
 - **Incidents** link to the actual transactions (stored, so they survive the in-memory window). They record affected wallets, onset, peak, detection latency, and auto-resolve.
-- **Investigation.** For any linked or recent transaction, Sentinel shows:
+- **Investigation.** For any transaction, Sentinel shows the items below. Recent and incident-linked transactions come from memory or SQLite; any other signature is fetched through Solami RPC and run through the same Vortex decoder.
   - a plain-language narrative
   - value flow between labelled parties (PDAs are resolved to their owner program through RPC)
   - net balance changes
@@ -47,7 +47,7 @@ Dashboard (live over SSE)
 | Solami product | Role |
 |---|---|
 | **Yellowstone gRPC** | The only data path. One subscription carries slots plus a named transaction filter over every monitored program (`account_include`, failed transactions included). Adding a program in the UI re-sends the filter over the open stream, with no reconnect. The stream answers pings and reconnects with backoff. |
-| **RPC** | `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
+| **RPC** | `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
 
 ## Run it
 
@@ -129,6 +129,8 @@ Webhook payloads are JSON with `event` (`sentinel.alert`, `sentinel.incident`, `
 cargo test
 ```
 
+`tests/real_transactions.rs` runs fingerprinting and tracing on real mainnet Pump.fun transactions: a failed Buy reached through a bot router, a successful trade, and a version 1 transaction. It asserts, for example, that the failure is attributed to `Pump.fun::Buy → TooMuchSolRequired (6002)`. The decoder itself has matching fixture tests in Vortex (`crates/vortex/tests/real_transactions.rs`).
+
 `tests/pipeline.rs` drives the real engine through a full cycle:
 - healthy baseline
 - failure spike → incident with linked transactions and fingerprints
@@ -139,6 +141,7 @@ cargo test
 ## Limits
 
 - Timestamps are Sentinel's receive time at `Processed` commitment; a transaction on a dropped fork can appear briefly.
+- Version 1 transactions carry compute-unit limit and price in a transaction config, not ComputeBudget instructions. Sentinel reports compute used for them, but not the limit or priority fee.
 - Program instructions are named from logs (Anchor `Instruction: X`), not IDLs. Truncated logs lose names beyond the cut.
 - Metrics and recent transactions live in memory (15 min). Incidents and their transactions are persisted. Detector state resets on restart, and incidents left open are closed out.
 
