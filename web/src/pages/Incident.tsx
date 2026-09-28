@@ -16,7 +16,7 @@ function fmtMetric(metric: string | null, v: number | null) {
   if (metric === 'failure_rate') return pct(v);
   if (metric === 'tps') return `${v.toFixed(2)} TPS`;
   if (metric === 'avg_compute') return `${compact(v)} CU`;
-  if (metric === 'error_count') return `${compact(v)} / 60s`;
+  if (metric === 'error_count') return `${Number.isInteger(v) ? num(v) : num(v, 1)} / 60s`;
   if (metric === 'transfer_usd') return usd(v) ?? '—';
   return compact(v);
 }

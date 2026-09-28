@@ -320,10 +320,16 @@ export function TimelineChart({
               </text>
             </g>
           ))}
-        {refs.map((r) => (
+        {refs.map((r, i) => (
           <g key={r.label}>
             <line x1={PAD.left} x2={width - PAD.right} y1={y(r.value)} y2={y(r.value)} stroke="var(--color-ink-3)" strokeDasharray="5 4" />
-            <text x={width - PAD.right - 2} y={y(r.value) - 4} textAnchor="end" className="fill-ink-3 text-[10px]">
+            {/* Alternate sides so nearby reference labels don't collide. */}
+            <text
+              x={i % 2 === 0 ? PAD.left + 4 : width - PAD.right - 2}
+              y={y(r.value) - 4}
+              textAnchor={i % 2 === 0 ? 'start' : 'end'}
+              className="fill-ink-3 text-[10px]"
+            >
               {r.label} {format(r.value)}
             </text>
           </g>

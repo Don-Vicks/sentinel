@@ -252,13 +252,21 @@ impl Window {
         self.buckets.iter().find(|b| b.second == second).map(point)
     }
 
-    /// First second in `[now - from_ago, now)` whose failure rate reached `pct`.
-    pub fn first_second_failure_above(&self, now: i64, from_ago: i64, pct: f64) -> Option<i64> {
-        self.buckets
-            .iter()
-            .filter(|b| b.second >= now - from_ago && b.second < now && b.tx > 0)
-            .find(|b| b.failed as f64 * 100.0 / b.tx as f64 >= pct)
-            .map(|b| b.second)
+    /// Start of the unbroken run of `chunk`-second blocks, ending now, whose
+    /// failure rate is at least `pct` (looking back at most `from_ago`).
+    /// Single seconds are too noisy at low TPS, so blocks are used.
+    pub fn failure_onset(&self, now: i64, from_ago: i64, pct: f64, chunk: i64) -> Option<i64> {
+        let mut onset = None;
+        let mut end = now;
+        while end - chunk >= now - from_ago {
+            let s = self.stats(now, now - (end - chunk), now - end);
+            if s.tx == 0 || s.failure_rate() < pct {
+                break;
+            }
+            onset = Some(end - chunk);
+            end -= chunk;
+        }
+        onset
     }
 }
 

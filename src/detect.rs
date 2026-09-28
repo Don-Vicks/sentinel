@@ -74,7 +74,7 @@ pub fn failure_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Dete
             cfg.failure_multiplier,
             cfg.failure_min_delta_pct,
         ),
-        onset: w.first_second_failure_above(now, win, threshold),
+        onset: w.failure_onset(now, win, threshold, 5),
     })
 }
 
