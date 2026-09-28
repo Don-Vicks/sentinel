@@ -27,12 +27,16 @@ Dashboard (live over SSE)
 - **Failure fingerprints.** Every failed transaction is attributed to the deepest failing frame in its call tree, as *program::instruction → error* (Anchor error names come from logs). For example: "83% of failures are `TooLittleSolReceived` in `Pump.fun::Sell`".
 - **Explainable detection.** No ML. Each detector compares a short window against a trailing baseline and states the rule it applied with real numbers:
   - failure-rate spike
+  - error-type spike: one error surging against its own baseline, or a never-seen error appearing, even when the overall failure rate looks normal
   - activity spike (mean + zσ)
   - activity stopped
   - compute spike
   - large transfer, by amount per asset or by USD value (Blur-priced, liquid tokens only)
 
   Seconds inside an open incident are left out of later baselines, so one incident doesn't mask the next.
+- **Per-instruction health.** Volume, failure rate and compute per instruction (Buy, Sell, …) over the last 5 minutes.
+- **Incident timelines.** The metric around each incident, with baseline, threshold, onset, detection and resolution markers, plus each error type's count over time. The timeline is saved with the incident when it resolves.
+- **Anchor IDL decoding.** Sentinel fetches each program's IDL from chain (current and legacy formats). It names instruction accounts (`bonding_curve`, `user`, …), decodes arguments (`amount`, `max_sol_cost`), and translates bare custom error codes into names and messages.
 - **Incidents** link to the actual transactions (stored, so they survive the in-memory window). They record affected wallets, onset, peak, detection latency, and auto-resolve.
 - **Investigation.** For any transaction, Sentinel shows the items below. Recent and incident-linked transactions come from memory or SQLite; any other signature is fetched through Solami RPC and run through the same Vortex decoder.
   - a plain-language narrative
@@ -119,6 +123,7 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 | GET | `/api/programs/{id}/transactions?failed=true` | Recent transactions |
 | GET | `/api/incidents?program=` | Incidents, newest first |
 | GET/PATCH | `/api/incidents/{id}` | Incident + linked transactions / set `status` |
+| GET | `/api/incidents/{id}/timeline` | 10s metric series around the incident |
 | GET | `/api/transactions/{signature}` | Decoded transaction + trace |
 | GET/POST, PATCH/DELETE | `/api/rules`, `/api/rules/{id}` | Alert rules |
 | POST | `/api/rules/{id}/test` | Send a test webhook |
@@ -134,6 +139,8 @@ cargo test
 ```
 
 `tests/real_transactions.rs` runs fingerprinting and tracing on real mainnet Pump.fun transactions: a failed Buy reached through a bot router, a successful trade, and a version 1 transaction. It asserts, for example, that the failure is attributed to `Pump.fun::Buy → TooMuchSolRequired (6002)`. The decoder itself has matching fixture tests in [Vortex](https://github.com/Don-Vicks/vortex/blob/master/crates/vortex/tests/real_transactions.rs).
+
+`tests/idl.rs` decodes a real mainnet Pump.fun Buy with Pump.fun's real on-chain IDL. It checks the named accounts and decoded arguments against the transfers Vortex decoded independently, plus IDL error naming.
 
 `tests/pricing.rs` runs a mock Blur server with the documented response shape (decimals as strings, key in `x-api-key`). It also checks that USD large-transfer detection ignores thin-liquidity tokens and that a USD alert rule fires on a liquid one.
 
