@@ -38,6 +38,15 @@ pub struct DetectionConfig {
     pub activity_min_tps: f64,
     pub activity_drop_enabled: bool,
 
+    /// One error type surging, or a new one appearing, even when the
+    /// overall failure rate looks normal.
+    pub error_enabled: bool,
+    pub error_window_secs: u32,
+    pub error_min_count: u32,
+    pub error_multiplier: f64,
+    /// Occurrences within the window for a never-seen error to count.
+    pub error_new_min_count: u32,
+
     pub compute_enabled: bool,
     pub compute_window_secs: u32,
     pub compute_multiplier: f64,
@@ -74,6 +83,11 @@ impl Default for DetectionConfig {
             activity_z: 4.0,
             activity_min_tps: 1.0,
             activity_drop_enabled: true,
+            error_enabled: true,
+            error_window_secs: 60,
+            error_min_count: 10,
+            error_multiplier: 3.0,
+            error_new_min_count: 5,
             compute_enabled: true,
             compute_window_secs: 60,
             compute_multiplier: 2.0,
@@ -104,6 +118,7 @@ pub enum IncidentKind {
     ComputeSpike,
     LargeTransfer,
     RuleTriggered,
+    ErrorSpike,
 }
 
 impl IncidentKind {
@@ -115,6 +130,7 @@ impl IncidentKind {
             Self::ComputeSpike => "compute_spike",
             Self::LargeTransfer => "large_transfer",
             Self::RuleTriggered => "rule_triggered",
+            Self::ErrorSpike => "error_spike",
         }
     }
 
@@ -130,6 +146,7 @@ impl IncidentKind {
             Self::ComputeSpike => "Compute usage spike",
             Self::LargeTransfer => "Large transfer",
             Self::RuleTriggered => "Alert rule triggered",
+            Self::ErrorSpike => "Error spike",
         }
     }
 }

@@ -71,6 +71,17 @@ pub struct ErrorCount {
     pub share: f64,
 }
 
+/// Volume, failures and compute for one instruction over the last 5 minutes.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstructionStat {
+    pub name: String,
+    pub tx: u64,
+    pub failed: u64,
+    pub failure_rate: f64,
+    pub avg_cu: f64,
+    pub share: f64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgramSnapshot {
     pub program_id: String,
@@ -93,6 +104,7 @@ pub struct ProgramSnapshot {
     pub baseline_tps: f64,
     pub baseline_avg_cu: f64,
     pub top_errors: Vec<ErrorCount>,
+    pub instructions: Vec<InstructionStat>,
     pub open_incidents: usize,
     pub last_tx_at: Option<DateTime<Utc>>,
     pub point: Option<SeriesPoint>,

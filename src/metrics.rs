@@ -17,9 +17,19 @@ pub struct Bucket {
     pub fees: u64,
     pub signers: HashSet<String>,
     pub fingerprints: HashMap<String, u32>,
+    pub instructions: HashMap<String, InstructionAgg>,
     /// Bitmask of detectors that considered this second anomalous; such
     /// seconds are left out of that detector's future baselines.
     pub anomalous: u8,
+}
+
+/// Per-instruction counters (instruction names of the monitored program).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InstructionAgg {
+    pub tx: u64,
+    pub failed: u64,
+    pub cu_sum: u64,
+    pub cu_n: u64,
 }
 
 pub const ANOMALY_FAILURE: u8 = 1;
@@ -37,6 +47,7 @@ pub struct Stats {
     pub fees: u64,
     pub unique_signers: usize,
     pub fingerprints: HashMap<String, u64>,
+    pub instructions: HashMap<String, InstructionAgg>,
 }
 
 impl Stats {
@@ -141,6 +152,24 @@ impl Window {
         }
     }
 
+    /// Counts one transaction against each instruction it invoked.
+    pub fn record_instructions(&mut self, second: i64, names: &[String], success: bool, compute: Option<u64>) {
+        let Some(bucket) = self.buckets.iter_mut().rev().find(|b| b.second <= second) else {
+            return;
+        };
+        for name in names {
+            let agg = bucket.instructions.entry(name.clone()).or_default();
+            agg.tx += 1;
+            if !success {
+                agg.failed += 1;
+            }
+            if let Some(cu) = compute {
+                agg.cu_sum += cu;
+                agg.cu_n += 1;
+            }
+        }
+    }
+
     /// Seconds of history available (for warmup checks).
     pub fn age(&self, now: i64) -> i64 {
         self.first_second.map(|f| now - f).unwrap_or(0)
@@ -178,6 +207,13 @@ impl Window {
             signers.extend(b.signers.iter().map(String::as_str));
             for (k, v) in &b.fingerprints {
                 *s.fingerprints.entry(k.clone()).or_default() += *v as u64;
+            }
+            for (k, v) in &b.instructions {
+                let agg = s.instructions.entry(k.clone()).or_default();
+                agg.tx += v.tx;
+                agg.failed += v.failed;
+                agg.cu_sum += v.cu_sum;
+                agg.cu_n += v.cu_n;
             }
         }
         s.unique_signers = signers.len();

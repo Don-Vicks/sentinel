@@ -5,7 +5,7 @@
 use crate::alerts::{Alert, Dispatcher};
 use crate::analyze::{fingerprint, summarize, symbol_for};
 use crate::detect::{self, Detection};
-use crate::live::{ErrorCount, IncidentChange, LiveEvent, ProgramSnapshot, StreamHealth};
+use crate::live::{ErrorCount, IncidentChange, InstructionStat, LiveEvent, ProgramSnapshot, StreamHealth};
 use crate::metrics::Window;
 use crate::model::*;
 use crate::source::VortexSource;
@@ -29,6 +29,8 @@ const FEED_BATCH: usize = 60;
 /// Event-driven incidents (large transfers, transfer rules) close after this
 /// long without a new matching transaction.
 const EVENT_INCIDENT_QUIET_SECS: i64 = 300;
+const ERROR_SPIKE_PREFIX: &str = "error_spike:";
+const MAX_OPEN_ERROR_SPIKES: usize = 3;
 
 pub struct Sentinel {
     pub store: Arc<Store>,
@@ -59,6 +61,7 @@ struct ProgramState {
     recent: VecDeque<TxSummary>,
     recent_full: VecDeque<(Arc<VortexTransaction>, TxSummary)>,
     fingerprints: HashMap<String, Fingerprint>,
+    fingerprint_first_seen: HashMap<String, i64>,
     open: HashMap<String, OpenIncident>,
     pending_feed: Vec<TxSummary>,
     rule_firing: HashMap<i64, bool>,
@@ -66,13 +69,27 @@ struct ProgramState {
     last_tx_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum LinkFilter {
     Failed,
     ComputeAbove(f64),
     All,
+    /// Failed transactions with one specific failure fingerprint.
+    Fingerprint(String),
     /// Linked explicitly by whoever raised the incident.
     Manual,
+}
+
+impl LinkFilter {
+    fn matches(&self, tx: &VortexTransaction, summary: &TxSummary) -> bool {
+        match self {
+            LinkFilter::Failed => !tx.success,
+            LinkFilter::ComputeAbove(t) => summary.compute_units.is_some_and(|cu| cu as f64 >= *t),
+            LinkFilter::All => true,
+            LinkFilter::Fingerprint(fp) => summary.fingerprint.as_deref() == Some(fp.as_str()),
+            LinkFilter::Manual => false,
+        }
+    }
 }
 
 struct OpenIncident {
@@ -94,6 +111,7 @@ impl ProgramState {
             recent: VecDeque::new(),
             recent_full: VecDeque::new(),
             fingerprints: HashMap::new(),
+            fingerprint_first_seen: HashMap::new(),
             open: HashMap::new(),
             pending_feed: Vec::new(),
             rule_firing: HashMap::new(),
@@ -219,6 +237,7 @@ impl Sentinel {
             let fp = fingerprint(&tx);
             if let Some(fp) = &fp {
                 ps.fingerprints.entry(fp.key()).or_insert_with(|| fp.clone());
+                ps.fingerprint_first_seen.entry(fp.key()).or_insert(second);
             }
             ps.window.record(
                 second,
@@ -228,6 +247,13 @@ impl Sentinel {
                 tx.fee_payer(),
                 fp.as_ref().map(Fingerprint::key),
             );
+            let mut names: Vec<String> = summary.instructions.clone();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                names.push("(unnamed)".into());
+            }
+            ps.window.record_instructions(second, &names, tx.success, summary.compute_units);
             ps.last_tx_at = Some(tx.received_at);
             ps.recent.push_front(summary.clone());
             ps.recent.truncate(RECENT_SUMMARIES);
@@ -305,13 +331,7 @@ impl Sentinel {
         second: i64,
     ) {
         let Some(open) = ps.open.get_mut(key) else { return };
-        let matches = match open.link {
-            LinkFilter::Failed => !tx.success,
-            LinkFilter::ComputeAbove(t) => summary.compute_units.is_some_and(|cu| cu as f64 >= t),
-            LinkFilter::All => true,
-            LinkFilter::Manual => false,
-        };
-        if matches {
+        if open.link.matches(tx, summary) {
             link_tx(&self.store, open, tx, summary, second);
         }
     }
@@ -357,16 +377,59 @@ impl Sentinel {
                     ps.window.flag(now, win as i64, bit);
                 }
             }
+            if ps.open.keys().any(|k| k.starts_with(ERROR_SPIKE_PREFIX)) {
+                ps.window.flag(now, cfg.error_window_secs as i64, ANOMALY_FAILURE);
+            }
             for (kind, detection) in detections {
                 let key = kind.as_str().to_string();
                 match detection {
                     Some(d) => {
-                        if let Some(opened) = self.on_detection(ps, &key, d, now) {
+                        if let Some(opened) = self.on_detection(ps, &key, d, None, now) {
                             alerts.extend(self.incident_rules(&rules, ps, &opened));
                         }
                     }
                     None => self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64),
                 }
+            }
+
+            // Error-type spikes. A failure-spike incident already breaks
+            // failures down by fingerprint, so don't open duplicates alongside it.
+            let labels = program_labels_one(&ps.program);
+            let spikes = {
+                let fps = &ps.fingerprints;
+                let describe = |key: &str| describe_fingerprint(fps.get(key), key, &labels);
+                detect::error_spikes(&ps.window, &cfg, now, &ps.fingerprint_first_seen, &describe)
+            };
+            let failure_open = ps.open.contains_key(IncidentKind::FailureSpike.as_str());
+            let mut firing: HashSet<String> = HashSet::new();
+            for spike in spikes {
+                let key = format!("{ERROR_SPIKE_PREFIX}{}", spike.key);
+                let already = ps.open.contains_key(&key);
+                let open_count = ps.open.keys().filter(|k| k.starts_with(ERROR_SPIKE_PREFIX)).count();
+                if !already && (failure_open || open_count >= MAX_OPEN_ERROR_SPIKES) {
+                    continue;
+                }
+                firing.insert(key.clone());
+                let link = Some(LinkFilter::Fingerprint(spike.key.clone()));
+                if let Some(mut opened) = self.on_detection(ps, &key, spike.detection, link, now) {
+                    if spike.new {
+                        opened.title = format!("New error · {}", ps.program.label);
+                        if let Some(open) = ps.open.get_mut(&key) {
+                            open.incident.title = opened.title.clone();
+                            open.dirty = true;
+                        }
+                    }
+                    alerts.extend(self.incident_rules(&rules, ps, &opened));
+                }
+            }
+            let quiet: Vec<String> = ps
+                .open
+                .keys()
+                .filter(|k| k.starts_with(ERROR_SPIKE_PREFIX) && !firing.contains(*k))
+                .cloned()
+                .collect();
+            for key in quiet {
+                self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64);
             }
 
             let pid = ps.program.program_id.clone();
@@ -460,7 +523,14 @@ impl Sentinel {
 
     /// Opens or refreshes the incident for a firing detector. Returns the
     /// incident when it was newly opened.
-    fn on_detection(&self, ps: &mut ProgramState, key: &str, d: Detection, now: i64) -> Option<Incident> {
+    fn on_detection(
+        &self,
+        ps: &mut ProgramState,
+        key: &str,
+        d: Detection,
+        link: Option<LinkFilter>,
+        now: i64,
+    ) -> Option<Incident> {
         if let Some(open) = ps.open.get_mut(key) {
             open.quiet_since = None;
             let inc = &mut open.incident;
@@ -479,12 +549,12 @@ impl Sentinel {
             return None;
         }
 
-        let link = match d.kind {
+        let link = link.unwrap_or(match d.kind {
             IncidentKind::FailureSpike => LinkFilter::Failed,
             IncidentKind::ComputeSpike => LinkFilter::ComputeAbove(d.threshold),
             IncidentKind::ActivitySpike => LinkFilter::All,
             _ => LinkFilter::Manual,
-        };
+        });
         let latest = ps.recent_full.front().map(|(t, _)| t.received_at);
         let incident = Incident {
             id: 0,
@@ -534,7 +604,7 @@ impl Sentinel {
         };
         let mut open = OpenIncident {
             incident,
-            link,
+            link: link.clone(),
             event_based,
             quiet_since: None,
             last_event: now,
@@ -547,12 +617,7 @@ impl Sentinel {
             .recent_full
             .iter()
             .filter(|(t, _)| t.received_at.timestamp() >= backfill_since)
-            .filter(|(t, s)| match link {
-                LinkFilter::Failed => !t.success,
-                LinkFilter::ComputeAbove(th) => s.compute_units.is_some_and(|cu| cu as f64 >= th),
-                LinkFilter::All => true,
-                LinkFilter::Manual => false,
-            })
+            .filter(|(t, s)| link.matches(t, s))
             .cloned()
             .collect();
         for (t, s) in backfill.iter().rev() {
@@ -1057,6 +1122,20 @@ fn link_tx(store: &Store, open: &mut OpenIncident, tx: &Arc<VortexTransaction>, 
     open.dirty = true;
 }
 
+/// "Pump.fun::Sell → TooLittleSolReceived (#6003)"
+fn describe_fingerprint(fp: Option<&Fingerprint>, key: &str, labels: &HashMap<String, String>) -> String {
+    let Some(fp) = fp else { return key.to_string() };
+    let program = program_label(&fp.program_id, labels);
+    let at = match &fp.instruction {
+        Some(ix) => format!("{program}::{ix}"),
+        None => program,
+    };
+    match fp.code {
+        Some(code) => format!("{} in {at} (#{code})", fp.error),
+        None => format!("{} in {at}", fp.error),
+    }
+}
+
 fn program_labels_one(p: &MonitoredProgram) -> HashMap<String, String> {
     HashMap::from([(p.program_id.clone(), p.label.clone())])
 }
@@ -1115,6 +1194,22 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
         })
         .collect();
 
+    let s300 = w.stats(now, 300, 0);
+    let mut instructions: Vec<InstructionStat> = s300
+        .instructions
+        .iter()
+        .map(|(name, a)| InstructionStat {
+            name: name.clone(),
+            tx: a.tx,
+            failed: a.failed,
+            failure_rate: if a.tx > 0 { a.failed as f64 * 100.0 / a.tx as f64 } else { 0.0 },
+            avg_cu: if a.cu_n > 0 { a.cu_sum as f64 / a.cu_n as f64 } else { 0.0 },
+            share: if s300.tx > 0 { a.tx as f64 / s300.tx as f64 } else { 0.0 },
+        })
+        .collect();
+    instructions.sort_by(|a, b| b.tx.cmp(&a.tx));
+    instructions.truncate(12);
+
     let worst = ps.open.values().map(|o| o.incident.severity).max();
     let warmup_remaining = (cfg.warmup_secs as i64 - w.age(now)).max(0);
     let health = match worst {
@@ -1146,6 +1241,7 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
         baseline_tps: base.tps(),
         baseline_avg_cu: base.avg_cu(),
         top_errors,
+        instructions,
         open_incidents: ps.open.len(),
         last_tx_at: ps.last_tx_at,
         point: w.point_at(now - 1),

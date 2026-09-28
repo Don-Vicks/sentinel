@@ -261,3 +261,134 @@ mod tests {
         assert!(activity_drop(&quiet, &cfg, 661).is_some());
     }
 }
+
+/// One error type (fingerprint) surging.
+pub struct ErrorSpike {
+    pub key: String,
+    pub new: bool,
+    pub detection: Detection,
+}
+
+/// Flags error types that surge against their own baseline, or that appear
+/// for the first time after warmup. `describe` renders a fingerprint key for
+/// humans; `first_seen` is the unix second each fingerprint was first observed.
+pub fn error_spikes(
+    w: &Window,
+    cfg: &DetectionConfig,
+    now: i64,
+    first_seen: &std::collections::HashMap<String, i64>,
+    describe: &dyn Fn(&str) -> String,
+) -> Vec<ErrorSpike> {
+    if !cfg.error_enabled || !warmed_up(w, cfg, now) {
+        return vec![];
+    }
+    let win = cfg.error_window_secs as i64;
+    let base_span = (cfg.baseline_secs as i64).min(w.age(now));
+    let cur = w.stats(now, win, 0);
+    let base = w.stats_masked(now, base_span, win, ANOMALY_FAILURE);
+    let base_windows = (base.seconds as f64 / win as f64).max(1.0);
+    let armed_at = w.first_second.unwrap_or(now) + cfg.warmup_secs as i64;
+
+    let mut out = Vec::new();
+    for (key, &count) in &cur.fingerprints {
+        let count = count as f64;
+        let expected = base.fingerprints.get(key).copied().unwrap_or(0) as f64 / base_windows;
+        let new = expected == 0.0 && first_seen.get(key).is_some_and(|&f| f >= armed_at);
+        let threshold = if new {
+            cfg.error_new_min_count as f64
+        } else {
+            (expected * cfg.error_multiplier)
+                .max(expected + 4.0 * expected.sqrt() + 3.0)
+                .max(cfg.error_min_count as f64)
+        };
+        if count < threshold {
+            continue;
+        }
+        let share = if cur.tx > 0 { count / cur.tx as f64 } else { 0.0 };
+        let severity = match share {
+            s if s >= 0.2 => Severity::High,
+            s if s >= 0.05 || new => Severity::Medium,
+            _ => Severity::Low,
+        };
+        let what = describe(key);
+        let (summary, explanation) = if new {
+            (
+                format!("New error: {what} ({count:.0} in {win}s)"),
+                format!(
+                    "{what} appeared {count:.0} times in the last {win}s ({:.1}% of transactions). It was \
+                     never seen during the previous {} of monitoring. Threshold for a new error is {} \
+                     occurrences in {win}s.",
+                    share * 100.0,
+                    mins(now - w.first_second.unwrap_or(now) - win),
+                    cfg.error_new_min_count,
+                ),
+            )
+        } else {
+            (
+                format!("{what}: {count:.0} in {win}s (normally {expected:.1})"),
+                format!(
+                    "{what} occurred {count:.0} times in the last {win}s ({:.1}% of transactions). Over \
+                     the previous {} (excluding earlier incidents) it averaged {expected:.2} per {win}s. \
+                     Threshold is max({}× expected, expected + 4√expected + 3, {}) = {threshold:.1}.",
+                    share * 100.0,
+                    mins(base_span - win),
+                    cfg.error_multiplier,
+                    cfg.error_min_count,
+                ),
+            )
+        };
+        out.push(ErrorSpike {
+            key: key.clone(),
+            new,
+            detection: Detection {
+                kind: IncidentKind::ErrorSpike,
+                severity,
+                metric: "error_count",
+                observed: count,
+                baseline: expected,
+                threshold,
+                summary,
+                explanation,
+                onset: Some(now - win),
+            },
+        });
+    }
+    out.sort_by(|a, b| b.detection.observed.total_cmp(&a.detection.observed));
+    out
+}
+
+#[cfg(test)]
+mod error_spike_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn surging_error_and_new_error() {
+        let cfg = DetectionConfig::default();
+        let mut w = Window::default();
+        let mut first_seen = HashMap::new();
+        first_seen.insert("a".to_string(), 0);
+        // 10 min: 10 tx/s, error "a" once every 10s.
+        for s in 0..600 {
+            for i in 0..10 {
+                let fp = (s % 10 == 0 && i == 0).then(|| "a".to_string());
+                w.record(s, fp.is_none(), None, 0, None, fp);
+            }
+        }
+        assert!(error_spikes(&w, &cfg, 600, &first_seen, &|k| k.to_string()).is_empty());
+        // Next 60s: "a" 3 times a second, and a brand-new "b" 10 times.
+        first_seen.insert("b".to_string(), 610);
+        for s in 600..660 {
+            for i in 0..10 {
+                let fp = if i < 3 { Some("a") } else if s % 6 == 0 && i == 3 { Some("b") } else { None };
+                w.record(s, fp.is_none(), None, 0, None, fp.map(str::to_string));
+            }
+        }
+        let spikes = error_spikes(&w, &cfg, 660, &first_seen, &|k| k.to_string());
+        let a = spikes.iter().find(|s| s.key == "a").expect("a surges");
+        assert!(!a.new && (a.detection.observed - 180.0).abs() < 1e-9);
+        assert_eq!(a.detection.severity, Severity::High);
+        let b = spikes.iter().find(|s| s.key == "b").expect("b is new");
+        assert!(b.new);
+    }
+}

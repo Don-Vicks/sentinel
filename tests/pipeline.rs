@@ -193,3 +193,60 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
     assert!(store.executions(10).unwrap().iter().any(|e| e.delivered));
     let _ = std::fs::remove_file(&dir);
 }
+
+fn with_error(base: Arc<VortexTransaction>, name: &str, code: u32) -> Arc<VortexTransaction> {
+    let mut t = (*base).clone();
+    if let Some(e) = t.error.as_mut() {
+        e.name = Some(name.into());
+        e.custom_code = Some(code);
+    }
+    Arc::new(t)
+}
+
+#[tokio::test]
+async fn new_error_type_opens_incident_while_failure_rate_is_flat() {
+    let dir = std::env::temp_dir().join(format!("sentinel-errspike-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(16);
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
+    s.add_program(PROGRAM.into(), None).unwrap();
+
+    let t0 = 1_700_000_000i64;
+    let mut n = 0;
+    // 5 min at 5 tx/s with a steady 10% slippage failures.
+    for sec in t0..t0 + 300 {
+        for _ in 0..5 {
+            n += 1;
+            let t = tx(n, sec, n % 10 != 0);
+            s.on_transaction(if t.success { t } else { with_error(t, "TooLittleSolReceived", 6003) });
+        }
+        s.on_tick(sec + 1);
+    }
+    // Next 60s: same 10% failure rate, but half of it is a brand-new error.
+    for sec in t0 + 300..t0 + 360 {
+        for _ in 0..5 {
+            n += 1;
+            let t = tx(n, sec, n % 10 != 0);
+            let t = match (t.success, n % 20 == 0) {
+                (true, _) => t,
+                (false, true) => with_error(t, "AccountNotInitialized", 3012),
+                (false, false) => with_error(t, "TooLittleSolReceived", 6003),
+            };
+            s.on_transaction(t);
+        }
+        s.on_tick(sec + 1);
+    }
+    let incidents = store.incidents(Some(PROGRAM), 10).unwrap();
+    assert!(incidents.iter().all(|i| i.kind != IncidentKind::FailureSpike), "overall rate is flat");
+    let inc = incidents
+        .iter()
+        .find(|i| i.kind == IncidentKind::ErrorSpike)
+        .expect("error spike incident");
+    assert!(inc.title.starts_with("New error"), "{}", inc.title);
+    assert!(inc.summary.contains("AccountNotInitialized"), "{}", inc.summary);
+    let linked = store.incident_transactions(inc.id, 100).unwrap();
+    assert!(!linked.is_empty());
+    assert!(linked.iter().all(|t| t.error.as_deref() == Some("AccountNotInitialized")));
+    let _ = std::fs::remove_file(&dir);
+}
