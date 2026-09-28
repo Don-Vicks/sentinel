@@ -1,0 +1,35 @@
+[package]
+name = "vortex-sentinel"
+version = "0.1.0"
+edition = "2021"
+description = "Real-time incident detection for Solana programs, built on the Vortex stream and Solami Yellowstone gRPC."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "sentinel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+vortex = { package = "solana-vortex", path = "../solana-tx-stack/crates/vortex" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+reqwest = { version = "0.11", features = ["json"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+solana-client = "1.18"
+solana-sdk = "1.18"
+axum = "0.8.9"
+tower-http = { version = "0.7.0", features = ["cors", "fs"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-util = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dotenv = "0.15"
+uuid = { version = "1", features = ["v4"] }
+bs58 = "0.5"
