@@ -8,10 +8,11 @@ import type { AlertExecution, AlertRule, Condition, Metric, Severity } from '../
 import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, Panel, Skeleton, Spinner } from '../components/ui';
 
-type Template = 'failure_rate' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'incident';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'incident';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
+  { id: 'failed_count', label: 'Failed transactions exceed', unit: 'tx', defaultValue: 3 },
   { id: 'tps', label: 'TPS is above', unit: 'TPS', defaultValue: 50 },
   { id: 'avg_compute', label: 'Average compute is above', unit: 'CU', defaultValue: 200_000 },
   { id: 'max_compute', label: 'Any transaction uses more than', unit: 'CU', defaultValue: 1_000_000 },
