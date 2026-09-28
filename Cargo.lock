@@ -4547,6 +4547,7 @@ dependencies = [
 [[package]]
 name = "solana-vortex"
 version = "0.1.3"
+source = "git+https://github.com/Don-Vicks/vortex?branch=master#2d252c307001ea0b7252b8922b3820fcaf098d9c"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
