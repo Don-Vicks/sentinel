@@ -5680,6 +5680,7 @@ dependencies = [
  "solana-vortex",
  "tokio",
  "tokio-stream",
+ "tower 0.5.3",
  "tower-http",
  "tracing",
  "tracing-subscriber",

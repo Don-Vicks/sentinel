@@ -38,3 +38,4 @@ flate2 = "1"
 
 [dev-dependencies]
 yellowstone-grpc-proto = "1.14"
+tower = { version = "0.5", features = ["util"] }

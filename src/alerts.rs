@@ -26,19 +26,75 @@ pub struct Dispatcher {
     client: reqwest::Client,
     store: Arc<Store>,
     live: broadcast::Sender<Arc<LiveEvent>>,
+    allow_private: bool,
+}
+
+fn is_public(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                || (o[0] == 100 && (64..128).contains(&o[1]))) // carrier-grade NAT
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            let seg = v6.segments()[0];
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || (seg & 0xfe00) == 0xfc00 // unique local
+                || (seg & 0xffc0) == 0xfe80) // link local
+        }
+    }
+}
+
+/// Webhooks go to the public internet only, so a rule can't be used to reach
+/// services on the host's private network. `allow_private` is for local dev.
+pub async fn check_webhook_url(url: &str, allow_private: bool) -> anyhow::Result<()> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| anyhow::anyhow!("Webhook URL is not a valid URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        anyhow::bail!("Webhook URL must start with http:// or https://");
+    }
+    let host = parsed.host_str().ok_or_else(|| anyhow::anyhow!("Webhook URL has no host"))?;
+    if allow_private {
+        return Ok(());
+    }
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<_> = tokio::net::lookup_host((host.trim_matches(['[', ']']), port))
+        .await
+        .map_err(|_| anyhow::anyhow!("Webhook host {host} doesn't resolve"))?
+        .collect();
+    if addrs.is_empty() || addrs.iter().any(|a| !is_public(a.ip())) {
+        anyhow::bail!("Webhook host {host} is on a private network; use a public URL");
+    }
+    Ok(())
 }
 
 impl Dispatcher {
+    pub fn allow_private(&self) -> bool {
+        self.allow_private
+    }
+
     pub fn new(store: Arc<Store>, live: broadcast::Sender<Arc<LiveEvent>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
             .user_agent("vortex-sentinel/0.1")
             .build()
             .expect("reqwest client");
+        let allow_private = std::env::var("SENTINEL_ALLOW_PRIVATE_WEBHOOKS").is_ok_and(|v| v == "1" || v == "true");
         Self {
             client,
             store,
             live,
+            allow_private,
         }
     }
 
@@ -59,6 +115,7 @@ impl Dispatcher {
     async fn deliver(&self, alert: Alert) -> AlertExecution {
         let mut exec = AlertExecution {
             id: 0,
+            owner: alert.rule.owner.clone(),
             rule_id: alert.rule.id,
             rule_name: alert.rule.name.clone(),
             program_id: alert.program_id.clone(),
@@ -77,6 +134,10 @@ impl Dispatcher {
             exec.delivered = true;
             return exec;
         };
+        if let Err(e) = check_webhook_url(&url, self.allow_private).await {
+            exec.error = Some(e.to_string());
+            return exec;
+        }
         let body = format_body(&url, &alert);
         let delivery_id = uuid::Uuid::new_v4().to_string();
 

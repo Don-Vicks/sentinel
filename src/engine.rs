@@ -31,6 +31,8 @@ const FEED_BATCH: usize = 60;
 /// long without a new matching transaction.
 const EVENT_INCIDENT_QUIET_SECS: i64 = 300;
 const ERROR_SPIKE_PREFIX: &str = "error_spike:";
+/// Owner of programs configured at startup (`SENTINEL_PROGRAMS`).
+pub const SYSTEM: &str = "system";
 const MAX_OPEN_ERROR_SPIKES: usize = 3;
 
 pub struct Sentinel {
@@ -40,6 +42,7 @@ pub struct Sentinel {
     pub owners: OwnerCache,
     pub prices: Arc<PriceBook>,
     pub idls: Arc<IdlRegistry>,
+    pub auth: crate::auth::Auth,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
     dispatcher: Dispatcher,
@@ -68,6 +71,8 @@ struct ProgramState {
     pending_feed: Vec<TxSummary>,
     rule_firing: HashMap<i64, bool>,
     rule_last_fired: HashMap<i64, i64>,
+    /// Accounts watching this program ("system" for startup programs).
+    watchers: HashSet<String>,
     last_tx_at: Option<DateTime<Utc>>,
 }
 
@@ -118,6 +123,7 @@ impl ProgramState {
             pending_feed: Vec::new(),
             rule_firing: HashMap::new(),
             rule_last_fired: HashMap::new(),
+            watchers: HashSet::new(),
             last_tx_at: None,
         }
     }
@@ -154,13 +160,26 @@ impl Sentinel {
             inc.summary = format!("{} (closed on restart)", inc.summary);
             store.update_incident(&inc)?;
         }
+        // Who watches what. Programs nobody watches (monitored before
+        // accounts existed) belong to "system" so they keep running.
+        for (account, program_id) in store.watchlist()? {
+            if let Some(ps) = state.programs.get_mut(&program_id) {
+                ps.watchers.insert(account);
+            }
+        }
+        for ps in state.programs.values_mut().filter(|ps| ps.watchers.is_empty()) {
+            store.watch(SYSTEM, &ps.program.program_id)?;
+            ps.watchers.insert(SYSTEM.to_string());
+        }
         let idls = IdlRegistry::new(rpc.clone());
+        let auth = crate::auth::Auth::new(store.clone(), &public_url);
         let this = Arc::new(Self {
             store,
             source,
             rpc,
             owners: OwnerCache::default(),
             idls,
+            auth,
             prices,
             live,
             public_url,
@@ -288,7 +307,9 @@ impl Sentinel {
                     self.large_transfer_incident(ps, &tx, &summary, big, second);
                 }
             }
-            for rule in rules.iter().filter(|r| applies(r, &pid)) {
+            let applicable: Vec<AlertRule> =
+                rules.iter().filter(|r| applies(r, &pid, &ps.watchers)).cloned().collect();
+            for rule in &applicable {
                 if let Condition::Transfer { mint, min_amount } = &rule.condition {
                     if let Some(t) = tx
                         .transfers
@@ -456,7 +477,9 @@ impl Sentinel {
             }
 
             let pid = ps.program.program_id.clone();
-            for rule in rules.iter().filter(|r| applies(r, &pid)) {
+            let applicable: Vec<AlertRule> =
+                rules.iter().filter(|r| applies(r, &pid, &ps.watchers)).cloned().collect();
+            for rule in &applicable {
                 if let Condition::Metric { metric, op, value, window_secs } = &rule.condition {
                     let stats = ps.window.stats(now, *window_secs as i64, 0);
                     let observed = match metric {
@@ -869,7 +892,7 @@ impl Sentinel {
     /// Webhook deliveries for rules that watch for incidents.
     fn incident_rules(&self, rules: &[AlertRule], ps: &ProgramState, incident: &Incident) -> Vec<Alert> {
         let mut out = Vec::new();
-        for rule in rules.iter().filter(|r| applies(r, &ps.program.program_id)) {
+        for rule in rules.iter().filter(|r| applies(r, &ps.program.program_id, &ps.watchers)) {
             let Condition::Incident { kinds, min_severity } = &rule.condition else { continue };
             if incident.severity < *min_severity || (!kinds.is_empty() && !kinds.contains(&incident.kind)) {
                 continue;
@@ -935,6 +958,10 @@ impl Sentinel {
     pub fn stream_health(&self) -> StreamHealth {
         let state = self.state.lock().unwrap();
         self.stream_health_locked(&state, Utc::now().timestamp())
+    }
+
+    pub fn allow_private_webhooks(&self) -> bool {
+        self.dispatcher.allow_private()
     }
 
     pub fn programs(&self) -> Vec<ProgramSnapshot> {
@@ -1025,7 +1052,59 @@ impl Sentinel {
 
     // ------------------------------------------------------------ commands
 
+    /// Monitors a program on behalf of the operator (startup programs, tests).
     pub fn add_program(&self, program_id: String, label: Option<String>) -> Result<MonitoredProgram> {
+        self.watch(SYSTEM, program_id, label)
+    }
+
+    /// Adds `program_id` to `account`'s watchlist, starting to monitor it if
+    /// nobody was yet.
+    pub fn watch(&self, account: &str, program_id: String, label: Option<String>) -> Result<MonitoredProgram> {
+        let program = self.ensure_program(program_id, label)?;
+        self.store.watch(account, &program.program_id)?;
+        if let Some(ps) = self.state.lock().unwrap().programs.get_mut(&program.program_id) {
+            ps.watchers.insert(account.to_string());
+        }
+        Ok(program)
+    }
+
+    /// Removes a program from `account`'s watchlist; stops monitoring it once
+    /// nobody watches it.
+    pub fn unwatch(&self, account: &str, program_id: &str) -> Result<()> {
+        self.store.unwatch(account, program_id)?;
+        let orphaned = {
+            let mut state = self.state.lock().unwrap();
+            let Some(ps) = state.programs.get_mut(program_id) else { return Ok(()) };
+            ps.watchers.remove(account);
+            ps.watchers.is_empty()
+        };
+        if orphaned {
+            self.remove_program(program_id)?;
+        }
+        Ok(())
+    }
+
+    pub fn watching(&self, account: &str) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .programs
+            .values()
+            .filter(|ps| ps.watchers.contains(account))
+            .map(|ps| ps.program.program_id.clone())
+            .collect()
+    }
+
+    pub fn is_watching(&self, account: &str, program_id: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .programs
+            .get(program_id)
+            .is_some_and(|ps| ps.watchers.contains(account))
+    }
+
+    fn ensure_program(&self, program_id: String, label: Option<String>) -> Result<MonitoredProgram> {
         if solana_sdk::pubkey::Pubkey::try_from(program_id.as_str()).is_err() {
             bail!("not a valid base58 public key");
         }
@@ -1149,8 +1228,12 @@ impl Sentinel {
 
 // ------------------------------------------------------------------ helpers
 
-fn applies(rule: &AlertRule, program_id: &str) -> bool {
-    rule.enabled && rule.program_id.as_deref().is_none_or(|p| p == program_id)
+/// A rule fires for a program when it targets it (or all programs) and its
+/// owner watches that program. Ownerless rules predate accounts and apply everywhere.
+fn applies(rule: &AlertRule, program_id: &str, watchers: &HashSet<String>) -> bool {
+    rule.enabled
+        && rule.program_id.as_deref().is_none_or(|p| p == program_id)
+        && rule.owner.as_deref().is_none_or(|o| watchers.contains(o))
 }
 
 fn link_tx(store: &Store, open: &mut OpenIncident, tx: &Arc<VortexTransaction>, summary: &TxSummary, now: i64) {

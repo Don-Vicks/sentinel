@@ -220,6 +220,9 @@ impl Fingerprint {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertRule {
     pub id: i64,
+    /// Wallet that owns the rule. Rules apply only to programs it watches.
+    #[serde(default)]
+    pub owner: Option<String>,
     pub name: String,
     /// `None` applies the rule to every monitored program.
     pub program_id: Option<String>,
@@ -319,6 +322,8 @@ impl Op {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlertExecution {
     pub id: i64,
+    #[serde(default)]
+    pub owner: Option<String>,
     pub rule_id: i64,
     pub rule_name: String,
     pub program_id: String,

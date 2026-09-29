@@ -1,10 +1,12 @@
 //! HTTP + SSE API consumed by the dashboard.
 
+use crate::alerts::check_webhook_url;
+use crate::auth::{session_token, Account, Viewer};
 use crate::engine::Sentinel;
 use crate::model::{AlertRule, Condition, DetectionConfig, IncidentStatus, Severity};
 use crate::trace;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, request::Parts, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -41,6 +43,10 @@ type ApiResult<T> = Result<Json<T>, ApiError>;
 
 pub fn router(sentinel: AppState) -> Router {
     Router::new()
+        .route("/api/auth/challenge", post(auth_challenge))
+        .route("/api/auth/verify", post(auth_verify))
+        .route("/api/auth/logout", post(auth_logout))
+        .route("/api/auth/me", get(auth_me))
         .route("/api/status", get(status))
         .route("/api/programs", get(list_programs).post(add_program))
         .route(
@@ -60,8 +66,56 @@ pub fn router(sentinel: AppState) -> Router {
         .with_state(sentinel)
 }
 
-async fn status(State(s): State<AppState>) -> ApiResult<Value> {
+// ------------------------------------------------------------------ auth
+
+#[derive(Deserialize)]
+struct ChallengeInput {
+    pubkey: String,
+}
+
+async fn auth_challenge(State(s): State<AppState>, Json(body): Json<ChallengeInput>) -> ApiResult<Value> {
+    Ok(Json(json!({ "message": s.auth.challenge(body.pubkey.trim())? })))
+}
+
+#[derive(Deserialize)]
+struct VerifyInput {
+    pubkey: String,
+    message: String,
+    /// Base58 ed25519 signature over `message`.
+    signature: String,
+}
+
+async fn auth_verify(State(s): State<AppState>, Json(body): Json<VerifyInput>) -> Result<Response, ApiError> {
+    let token = s
+        .auth
+        .verify(&body.pubkey, &body.message, &body.signature)
+        .map_err(|e| ApiError(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    let me = json!({ "account": body.pubkey, "watching": s.watching(&body.pubkey) });
+    Ok(([(header::SET_COOKIE, s.auth.set_cookie(&token))], Json(me)).into_response())
+}
+
+async fn auth_logout(State(s): State<AppState>, parts: Parts) -> Response {
+    if let Some(token) = session_token(&parts) {
+        s.auth.logout(&token);
+    }
+    ([(header::SET_COOKIE, s.auth.clear_cookie())], Json(json!({ "ok": true }))).into_response()
+}
+
+async fn auth_me(State(s): State<AppState>, Viewer(account): Viewer) -> ApiResult<Value> {
+    let watching = account.as_deref().map(|a| s.watching(a)).unwrap_or_default();
+    Ok(Json(json!({ "account": account, "watching": watching })))
+}
+
+fn forbidden(msg: &str) -> ApiError {
+    ApiError(StatusCode::FORBIDDEN, msg.into())
+}
+
+// --------------------------------------------------------------- programs
+
+async fn status(State(s): State<AppState>, Viewer(account): Viewer) -> ApiResult<Value> {
     Ok(Json(json!({
+        "account": account,
+        "watching": account.as_deref().map(|a| s.watching(a)).unwrap_or_default(),
         "stream": s.stream_health(),
         "pricing": s.prices.status(),
         "programs": s.programs(),
@@ -80,8 +134,12 @@ struct AddProgram {
     label: Option<String>,
 }
 
-async fn add_program(State(s): State<AppState>, Json(body): Json<AddProgram>) -> ApiResult<Value> {
-    let p = s.add_program(body.program_id.trim().to_string(), body.label)?;
+async fn add_program(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Json(body): Json<AddProgram>,
+) -> ApiResult<Value> {
+    let p = s.watch(&account, body.program_id.trim().to_string(), body.label)?;
     Ok(Json(json!(p)))
 }
 
@@ -99,14 +157,19 @@ struct UpdateProgram {
 
 async fn update_program(
     State(s): State<AppState>,
+    Account(account): Account,
     Path(id): Path<String>,
     Json(body): Json<UpdateProgram>,
 ) -> ApiResult<Value> {
+    if !s.is_watching(&account, &id) {
+        return Err(forbidden("Watch this program before changing its settings"));
+    }
     Ok(Json(json!(s.update_program(&id, body.label, body.detection)?)))
 }
 
-async fn remove_program(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
-    s.remove_program(&id)?;
+/// Removes the program from the caller's watchlist.
+async fn remove_program(State(s): State<AppState>, Account(account): Account, Path(id): Path<String>) -> ApiResult<Value> {
+    s.unwatch(&account, &id)?;
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -163,6 +226,7 @@ struct UpdateIncident {
 
 async fn update_incident(
     State(s): State<AppState>,
+    Account(_): Account,
     Path(id): Path<i64>,
     Json(body): Json<UpdateIncident>,
 ) -> ApiResult<Value> {
@@ -190,8 +254,27 @@ async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> 
     })))
 }
 
-async fn list_rules(State(s): State<AppState>) -> ApiResult<Value> {
-    Ok(Json(json!(s.store.rules()?)))
+async fn list_rules(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
+    let mine: Vec<AlertRule> = s
+        .store
+        .rules()?
+        .into_iter()
+        .filter(|r| r.owner.as_deref() == Some(account.as_str()))
+        .collect();
+    Ok(Json(json!(mine)))
+}
+
+fn owned_rule(s: &Sentinel, account: &str, id: i64) -> Result<AlertRule, ApiError> {
+    let rule = s
+        .store
+        .rules()?
+        .into_iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| not_found("rule"))?;
+    if rule.owner.as_deref() != Some(account) {
+        return Err(not_found("rule"));
+    }
+    Ok(rule)
 }
 
 #[derive(Deserialize)]
@@ -220,22 +303,28 @@ fn default_cooldown() -> u32 {
     300
 }
 
-fn validate(input: &RuleInput) -> Result<(), ApiError> {
+async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), ApiError> {
     if input.name.trim().is_empty() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "Name the rule".into()));
     }
-    if let Some(url) = input.webhook_url.as_deref().filter(|u| !u.is_empty()) {
-        if !(url.starts_with("https://") || url.starts_with("http://")) {
-            return Err(ApiError(StatusCode::BAD_REQUEST, "Webhook URL must start with http:// or https://".into()));
+    if let Some(pid) = input.program_id.as_deref().filter(|p| !p.is_empty()) {
+        if !s.is_watching(account, pid) {
+            return Err(forbidden("Rules can only target programs on your watchlist"));
         }
+    }
+    if let Some(url) = input.webhook_url.as_deref().filter(|u| !u.is_empty()) {
+        check_webhook_url(url, s.allow_private_webhooks())
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
     Ok(())
 }
 
-async fn create_rule(State(s): State<AppState>, Json(input): Json<RuleInput>) -> ApiResult<Value> {
-    validate(&input)?;
+async fn create_rule(State(s): State<AppState>, Account(account): Account, Json(input): Json<RuleInput>) -> ApiResult<Value> {
+    validate(&s, &account, &input).await?;
     let rule = s.store.create_rule(AlertRule {
         id: 0,
+        owner: Some(account),
         name: input.name.trim().to_string(),
         program_id: input.program_id.filter(|p| !p.is_empty()),
         condition: input.condition,
@@ -253,16 +342,12 @@ async fn create_rule(State(s): State<AppState>, Json(input): Json<RuleInput>) ->
 
 async fn update_rule(
     State(s): State<AppState>,
+    Account(account): Account,
     Path(id): Path<i64>,
     Json(input): Json<RuleInput>,
 ) -> ApiResult<Value> {
-    validate(&input)?;
-    let existing = s
-        .store
-        .rules()?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| not_found("rule"))?;
+    let existing = owned_rule(&s, &account, id)?;
+    validate(&s, &account, &input).await?;
     let rule = AlertRule {
         name: input.name.trim().to_string(),
         program_id: input.program_id.filter(|p| !p.is_empty()),
@@ -279,19 +364,15 @@ async fn update_rule(
     Ok(Json(json!(rule)))
 }
 
-async fn delete_rule(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+async fn delete_rule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    owned_rule(&s, &account, id)?;
     s.store.delete_rule(id)?;
     s.reload_rules()?;
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn test_rule(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
-    let rule = s
-        .store
-        .rules()?
-        .into_iter()
-        .find(|r| r.id == id)
-        .ok_or_else(|| not_found("rule"))?;
+async fn test_rule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    let rule = owned_rule(&s, &account, id)?;
     if rule.webhook_url.is_none() {
         return Err(ApiError(StatusCode::BAD_REQUEST, "Rule has no webhook URL".into()));
     }
@@ -299,8 +380,8 @@ async fn test_rule(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<
     Ok(Json(json!({ "queued": true })))
 }
 
-async fn list_alerts(State(s): State<AppState>) -> ApiResult<Value> {
-    Ok(Json(json!(s.store.executions(100)?)))
+async fn list_alerts(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
+    Ok(Json(json!(s.store.executions_for(&account, 100)?)))
 }
 
 #[derive(Deserialize)]
@@ -310,6 +391,7 @@ struct StreamQuery {
 
 async fn stream(
     State(s): State<AppState>,
+    Viewer(account): Viewer,
     Query(q): Query<StreamQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let hello = Event::default()
@@ -318,8 +400,15 @@ async fn stream(
         .ok();
     let events = BroadcastStream::new(s.live.subscribe()).filter_map(move |msg| {
         let program = q.program.clone();
+        let account = account.clone();
         async move {
             let ev = msg.ok()?;
+            // Alert deliveries are private to the rule's owner.
+            if let crate::live::LiveEvent::Alert { execution } = &*ev {
+                if execution.owner.is_some() && execution.owner != account {
+                    return None;
+                }
+            }
             if let (Some(want), Some(have)) = (program.as_deref(), ev.program_id()) {
                 if want != have {
                     return None;

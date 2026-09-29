@@ -79,6 +79,8 @@ fn tx(n: u64, second: i64, ok: bool) -> Arc<VortexTransaction> {
 
 #[tokio::test]
 async fn failure_spike_becomes_incident_and_fires_webhook() {
+    // The receiver below is on 127.0.0.1, which production blocks.
+    std::env::set_var("SENTINEL_ALLOW_PRIVATE_WEBHOOKS", "1");
     // Local webhook receiver.
     let received: Arc<Mutex<Vec<Value>>> = Arc::default();
     let sink = received.clone();
@@ -105,6 +107,7 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
     store
         .create_rule(AlertRule {
             id: 0,
+            owner: None,
             name: "Page on incidents".into(),
             program_id: None,
             condition: Condition::Incident { kinds: vec![], min_severity: Severity::Medium },

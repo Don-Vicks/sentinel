@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY,
+    account TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watchlist (
+    account TEXT NOT NULL,
+    program_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account, program_id)
+);
 CREATE TABLE IF NOT EXISTS alert_executions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_id INTEGER NOT NULL,
@@ -91,6 +102,66 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT data FROM programs ORDER BY rowid")?;
         let rows = stmt.query_map([], |r| parse(r.get(0)?))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- sessions ---
+
+    pub fn create_session(&self, token_hash: &str, account: &str, expires: chrono::DateTime<chrono::Utc>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at < ?1",
+            [chrono::Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            "INSERT INTO sessions(token_hash, account, expires_at) VALUES (?1, ?2, ?3)",
+            params![token_hash, account, expires.to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_account(&self, token_hash: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn
+            .query_row(
+                "SELECT account FROM sessions WHERE token_hash = ?1 AND expires_at > ?2",
+                params![token_hash, chrono::Utc::now().to_rfc3339()],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn delete_session(&self, token_hash: &str) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM sessions WHERE token_hash = ?1", [token_hash])?;
+        Ok(())
+    }
+
+    // --- watchlist ---
+
+    pub fn watch(&self, account: &str, program_id: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO watchlist(account, program_id, created_at) VALUES (?1, ?2, ?3)",
+            params![account, program_id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn unwatch(&self, account: &str, program_id: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "DELETE FROM watchlist WHERE account = ?1 AND program_id = ?2",
+            params![account, program_id],
+        )?;
+        Ok(())
+    }
+
+    /// (account, program_id) pairs.
+    pub fn watchlist(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT account, program_id FROM watchlist")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -255,6 +326,15 @@ impl Store {
             params![serde_json::to_string(&exec)?, exec.id],
         )?;
         Ok(exec)
+    }
+
+    pub fn executions_for(&self, owner: &str, limit: i64) -> Result<Vec<AlertExecution>> {
+        Ok(self
+            .executions(1000)?
+            .into_iter()
+            .filter(|e| e.owner.as_deref() == Some(owner))
+            .take(limit as usize)
+            .collect())
     }
 
     pub fn executions(&self, limit: i64) -> Result<Vec<AlertExecution>> {

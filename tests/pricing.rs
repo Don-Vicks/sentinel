@@ -151,6 +151,7 @@ async fn usd_large_transfer_detection_and_rule() {
     store
         .create_rule(AlertRule {
             id: 0,
+            owner: None,
             name: "Whale".into(),
             program_id: None,
             condition: Condition::TransferUsd { min_usd: 100_000.0 },
