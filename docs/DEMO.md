@@ -7,6 +7,7 @@ The rule is "runs live on mainnet, and clearly shows the product works", so ever
 - [ ] `.env` has the Solami key. `docker compose up --build` (or `cargo run --release`) is running.
 - [ ] Start **at least 15 minutes early**, so Pump.fun has a real baseline and a transaction history.
 - [ ] Sidebar stream panel shows **Live**, ingest tx/s > 0, and Blur prices with no error.
+- [ ] Signed in with your wallet (sidebar, bottom), and Pump.fun is starred (**Watch** on its page). Rules only fire for programs you watch.
 - [ ] A Discord channel is open in a second window. Its webhook is in an alert rule: **"An incident opens with severity at least: medium"**, scope all programs. Press **Test** once to confirm it arrives.
 - [ ] Canary fallback: fund `canary-keypair.json` with ~0.01 SOL. Monitor its address in Sentinel and add a rule: **Failed transactions exceed 3 over 60s**, with the Discord webhook.
 - [ ] Find a real Pump.fun trade with a USD value flow and note its signature. Also find one failed transaction with an IDL error message.

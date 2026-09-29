@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { ArrowRight, Pause, Play, Trash2 } from 'lucide-react';
+import { ArrowRight, Pause, Play, Star } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
+import { useAuth } from '../lib/auth';
 import type { Incident, MonitoredProgram, ProgramSnapshot, SeriesPoint, Severity, TxSummary } from '../lib/types';
 import { compact, duration, KIND_LABEL, num, pct } from '../lib/format';
 import { ActivityChart, LineChart, ShareBar, Sparkline } from '../components/charts';
@@ -91,6 +92,8 @@ export function Program() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
   const { reload: reloadPrograms } = usePrograms();
+  const { account, watching, refresh: refreshAuth, requestSignIn } = useAuth();
+  const [watchBusy, setWatchBusy] = useState(false);
   const { data, setData, error, loading, reload } = useFetch<Detail>(`/api/programs/${id}`);
   const [paused, setPaused] = useState(false);
   const [failedOnly, setFailedOnly] = useState(false);
@@ -143,11 +146,25 @@ export function Program() {
   const sparkFail = recent.map((b) => (b.tx ? (b.failed * 100) / b.tx : null));
   const sparkCu = recent.map((b) => (b.cu_n ? b.cu / b.cu_n : null));
 
-  const remove = async () => {
-    if (!confirm(`Stop monitoring ${data.program.label}? Its incidents stay in history.`)) return;
-    await send('DELETE', `/api/programs/${id}`);
-    await reloadPrograms();
-    navigate('/');
+  const isWatching = watching.includes(id);
+  const toggleWatch = async () => {
+    if (!account) return requestSignIn();
+    setWatchBusy(true);
+    try {
+      if (isWatching) {
+        await send('DELETE', `/api/programs/${id}`);
+      } else {
+        await send('POST', '/api/programs', { program_id: id });
+      }
+      await Promise.all([refreshAuth(), reloadPrograms()]);
+      // Leaving the last watch stops monitoring; the page has nothing left to show.
+      if (isWatching) {
+        const still = await fetch(`/api/programs/${id}`);
+        if (!still.ok) navigate('/');
+      }
+    } finally {
+      setWatchBusy(false);
+    }
   };
 
   return (
@@ -176,9 +193,15 @@ export function Program() {
           </span>
         }
         actions={
-          <button className="btn" onClick={remove}>
-            <Trash2 className="size-4" aria-hidden />
-            Stop monitoring
+          <button
+            className={isWatching ? 'btn' : 'btn-primary'}
+            onClick={toggleWatch}
+            disabled={watchBusy}
+            aria-pressed={isWatching}
+            title={isWatching ? 'Remove from your watchlist' : 'Add to your watchlist to get alerts for it'}
+          >
+            <Star className={`size-4 ${isWatching ? 'fill-current text-accent' : ''}`} aria-hidden />
+            {isWatching ? 'Watching' : 'Watch'}
           </button>
         }
       />

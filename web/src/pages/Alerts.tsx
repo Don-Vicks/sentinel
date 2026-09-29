@@ -4,6 +4,8 @@ import { BellRing, CheckCircle2, Send, Trash2, XCircle } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
+import { useAuth } from '../lib/auth';
+import { RequireAccount } from '../components/SignIn';
 import type { AlertExecution, AlertRule, Condition, Metric, Severity } from '../lib/types';
 import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../components/ui';
@@ -51,7 +53,9 @@ function describe(c: Condition) {
 }
 
 function RuleForm({ onCreated }: { onCreated: () => void }) {
-  const { programs } = usePrograms();
+  const { programs: all } = usePrograms();
+  const { watching } = useAuth();
+  const programs = all.filter((p) => watching.includes(p.program_id));
   const [name, setName] = useState('');
   const [program, setProgram] = useState('');
   const [template, setTemplate] = useState<Template>('failure_rate');
@@ -105,6 +109,12 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
 
   return (
     <form onSubmit={submit} className="p-4 grid gap-4">
+      {programs.length === 0 && (
+        <p className="rounded-md bg-warn-soft px-3 py-2 text-sm text-warn" role="status">
+          You aren't watching any programs yet, so rules have nothing to fire on.{' '}
+          <Link to="/" className="underline underline-offset-2">Watch a program</Link> first.
+        </p>
+      )}
       <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label className="label" htmlFor="rule-name">Name</label>
@@ -113,7 +123,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         <div>
           <label className="label" htmlFor="rule-program">Program</label>
           <select id="rule-program" className="input" value={program} onChange={(e) => setProgram(e.target.value)}>
-            <option value="">All monitored programs</option>
+            <option value="">All programs I watch ({programs.length})</option>
             {programs.map((p) => <option key={p.program_id} value={p.program_id}>{p.label}</option>)}
           </select>
         </div>
@@ -206,6 +216,20 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
 }
 
 export function Alerts() {
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        title="Alerts"
+        meta="Rules run against the live stream every second and deliver to your webhook."
+      />
+      <RequireAccount what="create alerts">
+        <AlertsBody />
+      </RequireAccount>
+    </div>
+  );
+}
+
+function AlertsBody() {
   const rules = useFetch<AlertRule[]>('/api/rules');
   const executions = useFetch<AlertExecution[]>('/api/alerts');
   const { programs } = usePrograms();
@@ -236,10 +260,6 @@ export function Alerts() {
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="Alerts"
-        meta="Rules run against the live stream every second and deliver to your webhook."
-      />
 
       <Panel title="New rule">
         <RuleForm onCreated={rules.reload} />

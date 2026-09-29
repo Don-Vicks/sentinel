@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { Plus, Radar, X } from 'lucide-react';
+import { Plus, Radar, Star, X } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { usePrograms } from '../lib/programs';
+import { useAuth } from '../lib/auth';
 import { useLive } from '../lib/live';
 import type { Incident, MonitoredProgram, ProgramSnapshot, SeriesPoint } from '../lib/types';
 import { compact, num, pct, short } from '../lib/format';
@@ -18,7 +19,8 @@ const SUGGESTED = [
 ];
 
 function AddProgram({ onDone }: { onDone?: () => void }) {
-  const { reload, programs } = usePrograms();
+  const { reload } = usePrograms();
+  const { refresh: refreshAuth, watching } = useAuth();
   const navigate = useNavigate();
   const [id, setId] = useState('');
   const [label, setLabel] = useState('');
@@ -33,7 +35,7 @@ function AddProgram({ onDone }: { onDone?: () => void }) {
         program_id: programId.trim(),
         label: programLabel?.trim() || undefined,
       });
-      await reload();
+      await Promise.all([reload(), refreshAuth()]);
       onDone?.();
       navigate(`/programs/${p.program_id}`);
     } catch (e) {
@@ -43,7 +45,7 @@ function AddProgram({ onDone }: { onDone?: () => void }) {
     }
   };
 
-  const watched = new Set(programs.map((p) => p.program_id));
+  const watched = new Set(watching);
   const suggestions = SUGGESTED.filter((s) => !watched.has(s.id));
   return (
     <div className="p-4 space-y-3">
@@ -55,7 +57,7 @@ function AddProgram({ onDone }: { onDone?: () => void }) {
         }}
       >
         <div>
-          <label className="label" htmlFor="program-id">Program or account address</label>
+          <label className="label" htmlFor="program-id">Program or account address (added to your watchlist)</label>
           <input
             id="program-id"
             className="input font-mono"
@@ -103,7 +105,7 @@ function failTone(p: ProgramSnapshot) {
   return '';
 }
 
-function ProgramRow({ p, series }: { p: ProgramSnapshot; series: SeriesPoint[] }) {
+function ProgramRow({ p, series, mine }: { p: ProgramSnapshot; series: SeriesPoint[]; mine: boolean }) {
   // 5-second buckets: per-second failure rates are too spiky at low TPS.
   const buckets: { tx: number; failed: number }[] = [];
   for (let i = 0; i < series.length; i += 5) {
@@ -121,6 +123,7 @@ function ProgramRow({ p, series }: { p: ProgramSnapshot; series: SeriesPoint[] }
         <span className="flex items-center gap-2">
           <HealthDot health={p.health} />
           <span className="font-medium text-ink truncate">{p.label}</span>
+          {mine && <Star className="size-3 shrink-0 fill-current text-accent" aria-label="On your watchlist" />}
         </span>
         <span className="mt-0.5 block font-mono text-xs text-ink-3 truncate">{short(p.program_id, 6)}</span>
       </div>
@@ -159,7 +162,11 @@ function ProgramRow({ p, series }: { p: ProgramSnapshot; series: SeriesPoint[] }
 
 export function Overview() {
   const { programs, series, loading, error, reload } = usePrograms();
+  const { account, watching, requestSignIn } = useAuth();
   const [adding, setAdding] = useState(false);
+  const [onlyMine, setOnlyMine] = useState(false);
+  const mine = new Set(watching);
+  const listed = onlyMine ? programs.filter((p) => mine.has(p.program_id)) : programs;
   const incidents = useFetch<Incident[]>('/api/incidents?limit=15');
   useLive((e) => {
     if (e.type === 'incident') incidents.setData((prev) => mergeIncident(prev ?? [], e.incident).slice(0, 15));
@@ -178,7 +185,7 @@ export function Overview() {
   ]
     .filter(Boolean)
     .join(' · ');
-  const showForm = adding || (!loading && !error && programs.length === 0);
+  const showForm = !!account && (adding || (!loading && !error && programs.length === 0));
 
   return (
     <div className="space-y-6">
@@ -186,8 +193,12 @@ export function Overview() {
         title="Overview"
         meta="Program health on Solana mainnet, streamed through Vortex."
         actions={
-          programs.length > 0 && (
-            <button className={adding ? 'btn' : 'btn-primary'} onClick={() => setAdding((a) => !a)} aria-expanded={adding}>
+          (programs.length > 0 || !account) && (
+            <button
+              className={adding ? 'btn' : 'btn-primary'}
+              onClick={() => (account ? setAdding((a) => !a) : requestSignIn())}
+              aria-expanded={adding}
+            >
               {adding ? <X className="size-4" aria-hidden /> : <Plus className="size-4" aria-hidden />}
               {adding ? 'Cancel' : 'Monitor a program'}
             </button>
@@ -222,12 +233,36 @@ export function Overview() {
       ) : programs.length === 0 ? (
         <div className="panel">
           <Empty title="No programs monitored" icon={<Radar className="size-6" aria-hidden />}>
-            Add a program above. Sentinel starts streaming its transactions immediately and learns a baseline over the
-            first two minutes.
+            {account
+              ? 'Add a program above. Sentinel starts streaming its transactions immediately and learns a baseline over the first two minutes.'
+              : 'Sign in with your wallet to add a program to your watchlist.'}
           </Empty>
         </div>
       ) : (
-        <Panel title="Programs" action={<span className="text-xs text-ink-3">last 5 min</span>}>
+        <Panel
+          title="Programs"
+          action={
+            account ? (
+              <div className="inline-flex rounded-md border border-line-strong p-0.5 text-xs" role="group" aria-label="Show">
+                {[
+                  { v: false, label: 'All' },
+                  { v: true, label: `Watching (${watching.length})` },
+                ].map((o) => (
+                  <button
+                    key={o.label}
+                    className={`h-7 rounded px-2.5 ${onlyMine === o.v ? 'bg-sunken font-medium text-ink' : 'text-ink-2'}`}
+                    aria-pressed={onlyMine === o.v}
+                    onClick={() => setOnlyMine(o.v)}
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <span className="text-xs text-ink-3">last 5 min</span>
+            )
+          }
+        >
           <div className="hidden md:grid grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)_minmax(0,1fr)_90px_110px] gap-4 px-4 py-2 border-b border-line text-xs text-ink-3">
             <span>Program</span>
             <span>Throughput</span>
@@ -236,9 +271,12 @@ export function Overview() {
             <span className="text-right">Status</span>
           </div>
           <div className="divide-y divide-line">
-            {programs.map((p) => (
-              <ProgramRow key={p.program_id} p={p} series={series[p.program_id] ?? []} />
+            {listed.map((p) => (
+              <ProgramRow key={p.program_id} p={p} series={series[p.program_id] ?? []} mine={mine.has(p.program_id)} />
             ))}
+            {listed.length === 0 && (
+              <Empty title="Your watchlist is empty">Add a program, or star one from its page.</Empty>
+            )}
           </div>
         </Panel>
       )}

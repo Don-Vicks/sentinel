@@ -3,6 +3,7 @@ import { Link, useParams, useSearchParams } from 'react-router';
 import { CheckCircle2, Search } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
+import { useAuth } from '../lib/auth';
 import type { Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
 import { clock, compact, duration, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { ShareBar } from '../components/charts';
@@ -29,6 +30,7 @@ export function Incident() {
     transactions: TxSummary[];
   }>(`/api/incidents/${id}`);
   const [busy, setBusy] = useState(false);
+  const { account, requestSignIn } = useAuth();
 
   useLive((e) => {
     if (e.type === 'incident' && String(e.incident.id) === id) {
@@ -47,6 +49,7 @@ export function Incident() {
   const end = inc.resolved_at ? new Date(inc.resolved_at).getTime() : Date.now();
 
   const setStatus = async (status: IncidentStatus) => {
+    if (!account) return requestSignIn();
     setBusy(true);
     try {
       const updated = await send<IncidentT>('PATCH', `/api/incidents/${inc.id}`, { status });

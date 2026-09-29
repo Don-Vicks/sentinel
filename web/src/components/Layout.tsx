@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router';
-import { Bell, LayoutGrid, Search, Siren } from 'lucide-react';
+import { Bell, LayoutGrid, Search, Siren, Star } from 'lucide-react';
 import { usePrograms } from '../lib/programs';
 import { useLiveStatus } from '../lib/live';
 import { HealthDot } from './ui';
+import { AccountChip } from './SignIn';
+import { useAuth } from '../lib/auth';
 import { compact, num, pct } from '../lib/format';
 
 /** Sentinel mark: a radar sweep over a program's signal. */
@@ -130,6 +132,8 @@ function TxSearch() {
 
 export function Layout() {
   const { programs } = usePrograms();
+  const { watching } = useAuth();
+  const mine = new Set(watching);
   const openIncidents = programs.reduce((n, p) => n + p.open_incidents, 0);
   const nav = [
     { to: '/', label: 'Overview', Icon: LayoutGrid, end: true, badge: 0 },
@@ -169,6 +173,9 @@ export function Layout() {
               <NavLink key={p.program_id} to={`/programs/${p.program_id}`} className={navCls}>
                 <HealthDot health={p.health} />
                 <span className="truncate">{p.label}</span>
+                {mine.has(p.program_id) && (
+                  <Star className="size-3 shrink-0 fill-current text-accent" aria-label="On your watchlist" />
+                )}
                 <span
                   className={`ml-auto num text-xs ${
                     p.open_incidents > 0 ? 'text-crit font-medium' : 'text-ink-3'
@@ -179,6 +186,9 @@ export function Layout() {
               </NavLink>
             ))}
           </div>
+        </div>
+        <div className="px-3 lg:pb-3">
+          <AccountChip />
         </div>
       </aside>
       <div className="min-w-0">

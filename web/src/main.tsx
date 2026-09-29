@@ -5,6 +5,8 @@ import '@fontsource-variable/geist';
 import '@fontsource-variable/geist-mono';
 import './index.css';
 import { ProgramsProvider } from './lib/programs';
+import { AuthProvider } from './lib/auth';
+import { SignInDialog } from './components/SignIn';
 import { Layout } from './components/Layout';
 import { Overview } from './pages/Overview';
 import { Program } from './pages/Program';
@@ -25,7 +27,9 @@ function NotFound() {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
+    <AuthProvider>
     <ProgramsProvider>
+      <SignInDialog />
       <BrowserRouter>
         <Routes>
           <Route element={<Layout />}>
@@ -40,5 +44,6 @@ createRoot(document.getElementById('root')!).render(
         </Routes>
       </BrowserRouter>
     </ProgramsProvider>
+    </AuthProvider>
   </StrictMode>,
 );

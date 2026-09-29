@@ -53,6 +53,7 @@ flowchart TD
   - the program call tree with per-program compute
   - account state diffs, instructions and logs
 - **Alert rules.** Supported conditions: failure rate, failed count, TPS, avg or max compute over a window, single transfers above a size or a USD value, or any incident above a severity. Each rule can open an incident, POST a webhook (with Discord and Slack formatting), or both. Every delivery is logged with its status and latency.
+- **Accounts: Sign-In With Solana.** Your wallet signs a one-time message (domain, nonce, 5-minute expiry). There are no passwords and nothing goes on chain. Each wallet has its own watchlist, alert rules, webhooks and delivery log; a rule only fires for programs its owner watches. Streaming and detection are shared per program, so everyone watching Pump.fun sees the same incidents. Browsing is public and read-only; watching programs and managing alerts need a signed-in wallet.
 - **Stream health.** The dashboard shows ingest tx/s, current slot, tip lag in slots, time since the last transaction, and events dropped.
 
 ## Numbers
@@ -111,6 +112,7 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SENTINEL_PORT` | `8080` | HTTP port (API + dashboard) |
 | `SENTINEL_DB` | `sentinel.db` | SQLite file |
 | `SENTINEL_PUBLIC_URL` | `http://localhost:8080` | Base URL for incident links in webhooks |
+| `SENTINEL_ALLOW_PRIVATE_WEBHOOKS` | — | `1` allows webhooks to private and loopback addresses (local dev only; blocked by default) |
 | `SENTINEL_SIMULATE` | — | **Dev only.** Program ID to feed with synthetic traffic instead of gRPC |
 
 ### Frontend development
@@ -142,18 +144,23 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 
 | Method | Path | |
 |---|---|---|
+| POST | `/api/auth/challenge` | `{pubkey}` → message for the wallet to sign |
+| POST | `/api/auth/verify` | `{pubkey, message, signature}` → session cookie |
+| POST / GET | `/api/auth/logout`, `/api/auth/me` | End the session / current account and watchlist |
 | GET | `/api/status` | Stream health + every program snapshot |
-| GET/POST | `/api/programs` | List / start monitoring `{program_id, label?}` |
-| GET/PATCH/DELETE | `/api/programs/{id}` | Detail (snapshot, 10-min series, recent tx, incidents) / update label or detection config / stop |
+| GET/POST | `/api/programs` | List / add to your watchlist `{program_id, label?}` 🔒 |
+| GET/PATCH/DELETE | `/api/programs/{id}` | Detail (snapshot, 10-min series, recent tx, incidents) / update settings 🔒 / remove from your watchlist 🔒 |
 | GET | `/api/programs/{id}/transactions?failed=true` | Recent transactions |
 | GET | `/api/incidents?program=` | Incidents, newest first |
 | GET/PATCH | `/api/incidents/{id}` | Incident + linked transactions / set `status` |
 | GET | `/api/incidents/{id}/timeline` | 10s metric series around the incident |
 | GET | `/api/transactions/{signature}` | Decoded transaction + trace |
-| GET/POST, PATCH/DELETE | `/api/rules`, `/api/rules/{id}` | Alert rules |
-| POST | `/api/rules/{id}/test` | Send a test webhook |
-| GET | `/api/alerts` | Webhook deliveries |
+| GET/POST, PATCH/DELETE | `/api/rules`, `/api/rules/{id}` | Your alert rules 🔒 |
+| POST | `/api/rules/{id}/test` | Send a test webhook 🔒 |
+| GET | `/api/alerts` | Your webhook deliveries 🔒 |
 | GET | `/api/stream?program=` | SSE: `transactions`, `metrics`, `incident`, `alert`, `stream` |
+
+🔒 requires a session (wallet sign-in). Incident status changes (`PATCH /api/incidents/{id}`) do too.
 
 Webhook payloads are JSON with `event` (`sentinel.alert`, `sentinel.incident`, `sentinel.test`), `rule`, `severity`, `program`, `message`, `incident` and `links.incident`. Each request carries an `X-Sentinel-Delivery` id for idempotency.
 
@@ -168,6 +175,14 @@ cargo test
 `tests/idl.rs` decodes a real mainnet Pump.fun Buy with Pump.fun's real on-chain IDL. It checks the named accounts and decoded arguments against the transfers Vortex decoded independently, plus IDL error naming.
 
 `tests/pricing.rs` runs a mock Blur server with the documented response shape (decimals as strings, key in `x-api-key`). It also checks that USD large-transfer detection ignores thin-liquidity tokens and that a USD alert rule fires on a liquid one.
+
+`tests/auth.rs` drives the real HTTP router through wallet sign-in:
+- a valid signature opens a session
+- a wrong wallet, a reused nonce or a tampered message are rejected
+- public reads work; writes need a session
+- one account can't see or delete another's rules, or target programs it doesn't watch
+- rules fire only on their owner's programs
+- webhooks to private networks are refused
 
 `tests/pipeline.rs` drives the real engine through a full cycle:
 - healthy baseline
