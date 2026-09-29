@@ -3,7 +3,7 @@ import { ArrowRight, CheckCircle2, ExternalLink, RotateCcw, XCircle } from 'luci
 import { useFetch } from '../lib/api';
 import type { CallNode, Party, TransactionDetail } from '../lib/types';
 import { clock, compact, explorer, explorerAccount, num, short, sol, usd } from '../lib/format';
-import { Address, CopyButton, Empty, ErrorState, PageSkeleton, Panel, Stat } from '../components/ui';
+import { Address, CopyButton, Empty, ErrorState, PageHeader, PageSkeleton, Panel, Stat } from '../components/ui';
 
 function PartyPill({ p, address }: { p?: Party; address: string }) {
   const label = p?.label ?? short(address);
@@ -84,32 +84,48 @@ export function Transaction() {
     tx.compute_unit_price && tx.compute_unit_limit ? (tx.compute_unit_price * tx.compute_unit_limit) / 1e6 : null;
 
   return (
-    <div className="space-y-5">
-      <header>
-        <div className="flex items-center gap-2 flex-wrap">
-          {tx.success ? (
-            <span className="inline-flex items-center gap-1 rounded bg-good-soft px-1.5 py-0.5 text-xs font-medium text-good">
-              <CheckCircle2 className="size-3.5" aria-hidden /> Succeeded
+    <div className="space-y-6">
+      <PageHeader
+        crumbs={[
+          ...data.monitored_programs.slice(0, 1).map((pid) => ({
+            label: data.program_labels[pid] ?? short(pid),
+            to: `/programs/${pid}`,
+          })),
+          ...data.incidents.slice(0, 1).map((iid) => ({ label: `Incident #${iid}`, to: `/incidents/${iid}` })),
+        ]}
+        title={
+          <span className="flex flex-wrap items-center gap-3">
+            Transaction
+            {tx.success ? (
+              <span className="inline-flex items-center gap-1 rounded bg-good-soft px-1.5 py-0.5 text-xs font-medium text-good">
+                <CheckCircle2 className="size-3.5" aria-hidden /> Succeeded
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 rounded bg-crit-soft px-1.5 py-0.5 text-xs font-medium text-crit">
+                <XCircle className="size-3.5" aria-hidden /> Failed
+              </span>
+            )}
+          </span>
+        }
+        meta={
+          <span className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span className="inline-flex items-center gap-1 font-mono text-xs text-ink-2 break-all">
+              {tx.signature}
+              <CopyButton text={tx.signature} label="Copy signature" />
             </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 rounded bg-crit-soft px-1.5 py-0.5 text-xs font-medium text-crit">
-              <XCircle className="size-3.5" aria-hidden /> Failed
-            </span>
-          )}
-          {data.incidents.map((id) => (
-            <Link key={id} to={`/incidents/${id}`} className="link text-xs">
-              Incident #{id}
-            </Link>
-          ))}
-        </div>
-        <h1 className="mt-2 flex items-center gap-1 font-mono text-sm sm:text-base break-all">
-          {tx.signature}
-          <CopyButton text={tx.signature} label="Copy signature" />
-        </h1>
-        <a className="link text-xs inline-flex items-center gap-1" href={explorer(tx.signature)} target="_blank" rel="noreferrer">
-          Solscan <ExternalLink className="size-3" aria-hidden />
-        </a>
-      </header>
+            {data.incidents.map((id) => (
+              <Link key={id} to={`/incidents/${id}`} className="link text-xs">
+                Incident #{id}
+              </Link>
+            ))}
+          </span>
+        }
+        actions={
+          <a className="btn" href={explorer(tx.signature)} target="_blank" rel="noreferrer">
+            Solscan <ExternalLink className="size-3.5" aria-hidden />
+          </a>
+        }
+      />
 
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         <Stat label="Slot" value={num(tx.slot)} sub={`received ${clock(tx.received_at)}`} />

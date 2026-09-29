@@ -1,4 +1,5 @@
 import { useState, type ReactNode } from 'react';
+import { Link } from 'react-router';
 import {
   AlertOctagon,
   AlertTriangle,
@@ -69,19 +70,64 @@ export function Stat({
   value,
   sub,
   tone,
+  spark,
+  badge,
 }: {
   label: string;
   value: ReactNode;
   sub?: ReactNode;
   tone?: 'crit' | 'warn' | 'good';
+  /** Small trend under the number. */
+  spark?: ReactNode;
+  /** Comparison chip, e.g. "3.1× normal". */
+  badge?: { text: string; tone: 'crit' | 'warn' | 'muted' } | null;
 }) {
   const toneCls = tone === 'crit' ? 'text-crit' : tone === 'warn' ? 'text-warn' : tone === 'good' ? 'text-good' : 'text-ink';
+  const badgeCls =
+    badge?.tone === 'crit' ? 'bg-crit-soft text-crit' : badge?.tone === 'warn' ? 'bg-warn-soft text-warn' : 'bg-sunken text-ink-3';
   return (
-    <div className="panel px-4 py-3 min-w-0">
-      <div className="text-xs text-ink-3">{label}</div>
-      <div className={`num text-xl font-semibold mt-1 truncate ${toneCls}`}>{value}</div>
-      {sub && <div className="text-xs text-ink-3 mt-0.5 truncate">{sub}</div>}
+    <div className="panel px-4 pt-3 pb-3 min-w-0 flex flex-col">
+      <span className="text-xs text-ink-3 truncate">{label}</span>
+      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className={`num text-[22px] leading-7 font-semibold tracking-tight truncate ${toneCls}`}>{value}</span>
+        {badge && <span className={`rounded px-1.5 py-px num text-[11px] font-medium whitespace-nowrap ${badgeCls}`}>{badge.text}</span>}
+      </div>
+      {sub && <div className="text-xs text-ink-3 mt-0.5 truncate" title={typeof sub === 'string' ? sub : undefined}>{sub}</div>}
+      {spark && <div className="mt-2 -mx-1">{spark}</div>}
     </div>
+  );
+}
+
+/** Title row with breadcrumbs and actions. */
+export function PageHeader({
+  crumbs = [],
+  title,
+  meta,
+  actions,
+}: {
+  crumbs?: { label: string; to: string }[];
+  title: ReactNode;
+  meta?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <header className="flex flex-wrap items-end justify-between gap-3">
+      <div className="min-w-0">
+        {crumbs.length > 0 && (
+          <nav aria-label="Breadcrumb" className="mb-1 flex items-center gap-1.5 text-xs text-ink-3">
+            {crumbs.map((c) => (
+              <span key={c.to} className="inline-flex items-center gap-1.5">
+                <Link to={c.to} className="hover:text-ink">{c.label}</Link>
+                <span aria-hidden>/</span>
+              </span>
+            ))}
+          </nav>
+        )}
+        <h1 className="text-xl font-semibold tracking-tight text-ink">{title}</h1>
+        {meta && <div className="mt-1 text-sm text-ink-2">{meta}</div>}
+      </div>
+      {actions && <div className="flex items-center gap-2">{actions}</div>}
+    </header>
   );
 }
 

@@ -945,6 +945,17 @@ impl Sentinel {
         out
     }
 
+    /// Recent per-second points for every program (overview sparklines).
+    pub fn programs_series(&self, secs: i64) -> HashMap<String, Vec<crate::metrics::SeriesPoint>> {
+        let state = self.state.lock().unwrap();
+        let now = Utc::now().timestamp();
+        state
+            .programs
+            .iter()
+            .map(|(id, ps)| (id.clone(), ps.window.series(now, secs)))
+            .collect()
+    }
+
     pub fn program_detail(&self, program_id: &str) -> Option<serde_json::Value> {
         let state = self.state.lock().unwrap();
         let ps = state.programs.get(program_id)?;
@@ -1214,7 +1225,11 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
     let s60 = w.stats(now, 60, 0);
     let s10 = w.stats(now, 10, 0);
     let base_span = (cfg.baseline_secs as i64).min(w.age(now));
-    let base = w.stats(now, base_span, 60);
+    // "Normal" as the detectors see it: incident periods excluded.
+    use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
+    let base_fail = w.stats_masked(now, base_span, 60, ANOMALY_FAILURE);
+    let base_tps = w.stats_masked(now, base_span, 60, ANOMALY_ACTIVITY);
+    let base_cu = w.stats_masked(now, base_span, 60, ANOMALY_COMPUTE);
     let labels = program_labels_one(&ps.program);
 
     let mut errors: Vec<_> = s60.fingerprints.iter().collect();
@@ -1280,9 +1295,9 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
         max_cu_60s: s60.cu_max,
         unique_signers_60s: s60.unique_signers,
         fees_60s_sol: s60.fees as f64 / 1e9,
-        baseline_failure_rate: base.failure_rate(),
-        baseline_tps: base.tps(),
-        baseline_avg_cu: base.avg_cu(),
+        baseline_failure_rate: base_fail.failure_rate(),
+        baseline_tps: base_tps.tps(),
+        baseline_avg_cu: base_cu.avg_cu(),
         top_errors,
         instructions,
         open_incidents: ps.open.len(),

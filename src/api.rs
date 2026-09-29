@@ -65,6 +65,7 @@ async fn status(State(s): State<AppState>) -> ApiResult<Value> {
         "stream": s.stream_health(),
         "pricing": s.prices.status(),
         "programs": s.programs(),
+        "series": s.programs_series(300),
         "now": Utc::now(),
     })))
 }

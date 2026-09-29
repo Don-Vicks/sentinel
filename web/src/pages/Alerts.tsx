@@ -6,7 +6,7 @@ import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
 import type { AlertExecution, AlertRule, Condition, Metric, Severity } from '../lib/types';
 import { ago, clock, short } from '../lib/format';
-import { Empty, ErrorState, Panel, Skeleton, Spinner } from '../components/ui';
+import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../components/ui';
 
 type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident';
 
@@ -235,11 +235,11 @@ export function Alerts() {
   };
 
   return (
-    <div className="space-y-5">
-      <header>
-        <h1 className="text-xl font-semibold">Alerts</h1>
-        <p className="text-ink-2 mt-1">Rules run against the live stream every second and deliver to your webhook.</p>
-      </header>
+    <div className="space-y-6">
+      <PageHeader
+        title="Alerts"
+        meta="Rules run against the live stream every second and deliver to your webhook."
+      />
 
       <Panel title="New rule">
         <RuleForm onCreated={rules.reload} />

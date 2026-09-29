@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import { ArrowLeft, CheckCircle2, Search } from 'lucide-react';
+import { CheckCircle2, Search } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import type { Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
 import { clock, compact, duration, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { ShareBar } from '../components/charts';
-import { Empty, ErrorState, PageSkeleton, Panel, SeverityBadge, Spinner, Stat, StatusBadge } from '../components/ui';
+import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, Spinner, Stat, StatusBadge } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
 import { IncidentTimeline } from '../components/IncidentTimeline';
@@ -57,39 +57,40 @@ export function Incident() {
   };
 
   return (
-    <div className="space-y-5">
-      <Link to="/incidents" className="inline-flex items-center gap-1 text-sm text-ink-2 hover:text-ink">
-        <ArrowLeft className="size-4" aria-hidden /> Incidents
-      </Link>
-
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="num text-ink-3">#{inc.id}</span>
+    <div className="space-y-6">
+      <PageHeader
+        crumbs={[
+          { label: 'Incidents', to: '/incidents' },
+          { label: data.program_label ?? short(inc.program_id), to: `/programs/${inc.program_id}` },
+        ]}
+        title={
+          <span className="flex flex-wrap items-center gap-2">
+            {KIND_LABEL[inc.kind]}
+            <span className="num text-ink-3 font-normal">#{inc.id}</span>
+          </span>
+        }
+        meta={
+          <span className="flex flex-wrap items-center gap-2">
             <SeverityBadge severity={inc.severity} />
             <StatusBadge status={inc.status} />
-          </div>
-          <h1 className="text-xl font-semibold mt-1">{KIND_LABEL[inc.kind]}</h1>
-          <p className="text-ink-2 mt-1">
-            <Link to={`/programs/${inc.program_id}`} className="link">
-              {data.program_label ?? short(inc.program_id)}
-            </Link>{' '}
-            · {inc.summary}
-          </p>
-        </div>
-        {ongoing && (
-          <div className="flex gap-2">
-            {inc.status === 'open' && (
-              <button className="btn" disabled={busy} onClick={() => setStatus('investigating')}>
-                <Search className="size-4" aria-hidden /> Investigating
+            <span className="text-ink-2">{inc.summary}</span>
+          </span>
+        }
+        actions={
+          ongoing && (
+            <>
+              {inc.status === 'open' && (
+                <button className="btn" disabled={busy} onClick={() => setStatus('investigating')}>
+                  <Search className="size-4" aria-hidden /> Investigating
+                </button>
+              )}
+              <button className="btn-primary" disabled={busy} onClick={() => setStatus('resolved')}>
+                {busy ? <Spinner /> : <CheckCircle2 className="size-4" aria-hidden />} Resolve
               </button>
-            )}
-            <button className="btn-primary" disabled={busy} onClick={() => setStatus('resolved')}>
-              {busy ? <Spinner /> : <CheckCircle2 className="size-4" aria-hidden />} Resolve
-            </button>
-          </div>
-        )}
-      </header>
+            </>
+          )
+        }
+      />
 
       <div className="panel p-4">
         <h2 className="panel-title mb-2">Why this fired</h2>
@@ -184,12 +185,11 @@ export function Incidents() {
   const list = (data ?? []).filter((i) => filter === 'all' || i.status !== 'resolved');
 
   return (
-    <div className="space-y-5">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold">Incidents</h1>
-          <p className="text-ink-2 mt-1">Every detector and rule that fired, linked to the transactions behind it.</p>
-        </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="Incidents"
+        meta="Every detector and rule that fired, linked to the transactions behind it."
+        actions={
         <div className="inline-flex rounded-md border border-line-strong p-0.5" role="group" aria-label="Filter">
           {(['all', 'active'] as const).map((f) => (
             <button
@@ -202,7 +202,8 @@ export function Incidents() {
             </button>
           ))}
         </div>
-      </header>
+        }
+      />
       {error ? (
         <ErrorState message={error} onRetry={reload} />
       ) : loading && !data ? (

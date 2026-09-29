@@ -1,56 +1,98 @@
-import { useState } from 'react';
-import { NavLink, Outlet, useNavigate } from 'react-router';
-import { Activity, Bell, LayoutGrid, Search, Siren } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Link, NavLink, Outlet, useNavigate } from 'react-router';
+import { Bell, LayoutGrid, Search, Siren } from 'lucide-react';
 import { usePrograms } from '../lib/programs';
 import { useLiveStatus } from '../lib/live';
 import { HealthDot } from './ui';
-import { compact, num } from '../lib/format';
+import { compact, num, pct } from '../lib/format';
 
-const nav = [
-  { to: '/', label: 'Overview', Icon: LayoutGrid, end: true },
-  { to: '/incidents', label: 'Incidents', Icon: Siren, end: false },
-  { to: '/alerts', label: 'Alerts', Icon: Bell, end: false },
-];
+/** Sentinel mark: a radar sweep over a program's signal. */
+export function Mark({ className = 'size-7' }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 28 28" className={className} aria-hidden>
+      <rect width="28" height="28" rx="7" fill="var(--color-ink)" />
+      <circle cx="14" cy="14" r="8.5" fill="none" stroke="var(--color-canvas)" strokeOpacity="0.35" strokeWidth="1.5" />
+      <circle cx="14" cy="14" r="4" fill="none" stroke="var(--color-canvas)" strokeOpacity="0.35" strokeWidth="1.5" />
+      <path d="M14 14 L20.5 8.5" stroke="var(--color-canvas)" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="18.6" cy="17.4" r="2" fill="var(--color-series-fail)" />
+    </svg>
+  );
+}
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 rounded-md px-2.5 h-9 text-sm ${
     isActive ? 'bg-sunken text-ink font-medium' : 'text-ink-2 hover:text-ink hover:bg-sunken'
   }`;
 
-function StreamPanel() {
-  const { stream } = usePrograms();
+function useClock() {
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  return now;
+}
+
+/** Always-visible live state of the Vortex stream. */
+function StatusBar() {
+  const { stream, programs } = usePrograms();
   const sse = useLiveStatus();
-  const connected = !!stream?.connected && sse;
+  const now = useClock();
+  const live = !!stream?.connected && sse;
+  const openIncidents = programs.reduce((n, p) => n + p.open_incidents, 0);
   const age = stream?.last_transaction_age_ms;
+  const blur = stream?.pricing;
+
+  const item = 'hidden md:inline-flex items-baseline gap-1.5 whitespace-nowrap';
   return (
-    <div className="rounded-md border border-line bg-surface p-3 text-xs space-y-2">
-      <div className="flex items-center justify-between">
-        <span className="font-medium text-ink">Vortex stream</span>
-        <span className={`inline-flex items-center gap-1.5 ${connected ? 'text-good' : 'text-warn'}`}>
-          <span className={`size-2 rounded-full ${connected ? 'bg-good' : 'bg-warn'} pulse-dot`} aria-hidden />
-          {connected ? 'Live' : sse ? 'Waiting for data' : 'Reconnecting'}
+    <div className="sticky top-0 z-20 flex h-11 items-center gap-4 overflow-hidden border-b border-line bg-canvas/90 px-4 text-xs backdrop-blur lg:px-8">
+      <span className={`inline-flex items-center gap-2 whitespace-nowrap font-medium ${live ? 'text-good' : 'text-warn'}`}>
+        <span className={`size-2 rounded-full ${live ? 'bg-good' : 'bg-warn'} pulse-dot`} aria-hidden />
+        {live ? 'Live' : sse ? 'Waiting for data' : 'Reconnecting'}
+      </span>
+      <span className="hidden xl:inline whitespace-nowrap text-ink-3">Solami Yellowstone gRPC</span>
+      <span className={item}>
+        <span className="text-ink-3">ingest</span>
+        <span className="num text-ink">{stream ? `${compact(stream.ingest_tps)} tx/s` : '—'}</span>
+      </span>
+      <span className={item}>
+        <span className="text-ink-3">slot</span>
+        <span className="num text-ink">{stream?.last_slot ? num(stream.last_slot) : '—'}</span>
+      </span>
+      <span className={item} title="Slots between the chain tip on the stream and the newest transaction">
+        <span className="text-ink-3">lag</span>
+        <span className="num text-ink">{stream ? stream.slot_lag : '—'}</span>
+      </span>
+      <span className={`${item} max-xl:hidden`}>
+        <span className="text-ink-3">last tx</span>
+        <span className="num text-ink">{age == null ? '—' : `${(age / 1000).toFixed(1)}s`}</span>
+      </span>
+      <span className={`${item} max-xl:hidden`} title={blur?.last_error ?? 'USD prices from Solami Blur'}>
+        <span className="text-ink-3">blur</span>
+        <span className={`num ${blur?.last_error ? 'text-warn' : 'text-ink'}`}>
+          {!blur ? '—' : !blur.enabled ? 'off' : blur.last_error ? 'error' : `${num(blur.priced_mints)} priced`}
         </span>
-      </div>
-      <div className="text-ink-3">Solami Yellowstone gRPC</div>
-      <dl className="grid grid-cols-2 gap-x-2 gap-y-1">
-        <dt className="text-ink-3">Ingest</dt>
-        <dd className="num text-right text-ink">{stream ? `${compact(stream.ingest_tps)} tx/s` : '—'}</dd>
-        <dt className="text-ink-3">Slot</dt>
-        <dd className="num text-right text-ink">{stream?.last_slot ? num(stream.last_slot) : '—'}</dd>
-        <dt className="text-ink-3">Tip lag</dt>
-        <dd className="num text-right text-ink">{stream ? `${stream.slot_lag} slots` : '—'}</dd>
-        <dt className="text-ink-3">Last tx</dt>
-        <dd className="num text-right text-ink">{age == null ? '—' : `${(age / 1000).toFixed(1)}s ago`}</dd>
-        <dt className="text-ink-3">Blur prices</dt>
-        <dd
-          className={`num text-right ${stream?.pricing.last_error ? 'text-warn' : 'text-ink'}`}
-          title={stream?.pricing.last_error ?? undefined}
+      </span>
+      {!!stream?.dropped && (
+        <span className="inline-flex items-baseline gap-1.5 text-warn">
+          <span>dropped</span>
+          <span className="num">{num(stream.dropped)}</span>
+        </span>
+      )}
+      <span className="ml-auto flex items-center gap-4">
+        <Link
+          to="/incidents"
+          className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded px-2 py-1 ${
+            openIncidents ? 'bg-crit-soft text-crit font-medium' : 'text-ink-3 hover:text-ink'
+          }`}
         >
-          {!stream ? '—' : !stream.pricing.enabled ? 'off' : stream.pricing.last_error ? 'error' : `${num(stream.pricing.priced_mints)} mints`}
-        </dd>
-        <dt className="text-ink-3">Dropped</dt>
-        <dd className={`num text-right ${stream?.dropped ? 'text-warn' : 'text-ink'}`}>{stream ? num(stream.dropped) : '—'}</dd>
-      </dl>
+          <Siren className="size-3.5" aria-hidden />
+          {openIncidents ? `${openIncidents} open` : 'None open'}
+        </Link>
+        <span className="hidden sm:inline whitespace-nowrap num text-ink-3" title="UTC">
+          {now.toISOString().slice(11, 19)} UTC
+        </span>
+      </span>
     </div>
   );
 }
@@ -61,7 +103,7 @@ function TxSearch() {
   return (
     <form
       role="search"
-      className="relative px-2 mt-3"
+      className="relative px-3"
       onSubmit={(e) => {
         e.preventDefault();
         const v = sig.trim();
@@ -72,7 +114,7 @@ function TxSearch() {
       }}
     >
       <label htmlFor="tx-search" className="sr-only">Investigate a transaction signature</label>
-      <Search className="absolute left-4.5 top-2.5 size-4 text-ink-3" aria-hidden />
+      <Search className="pointer-events-none absolute left-5.5 top-2.5 size-4 text-ink-3" aria-hidden />
       <input
         id="tx-search"
         className="input pl-8 font-mono text-xs"
@@ -88,49 +130,63 @@ function TxSearch() {
 
 export function Layout() {
   const { programs } = usePrograms();
+  const openIncidents = programs.reduce((n, p) => n + p.open_incidents, 0);
+  const nav = [
+    { to: '/', label: 'Overview', Icon: LayoutGrid, end: true, badge: 0 },
+    { to: '/incidents', label: 'Incidents', Icon: Siren, end: false, badge: openIncidents },
+    { to: '/alerts', label: 'Alerts', Icon: Bell, end: false, badge: 0 },
+  ];
   return (
-    <div className="min-h-screen lg:grid lg:grid-cols-[240px_1fr]">
-      <aside className="border-b lg:border-b-0 lg:border-r border-line bg-canvas lg:sticky lg:top-0 lg:h-screen flex flex-col">
-        <div className="flex items-center gap-2 px-4 h-14 shrink-0">
-          <span className="inline-flex size-7 items-center justify-center rounded-md bg-ink text-canvas">
-            <Activity className="size-4" aria-hidden />
+    <div className="min-h-screen lg:grid lg:grid-cols-[232px_1fr]">
+      <aside className="border-b lg:border-b-0 lg:border-r border-line bg-canvas lg:sticky lg:top-0 lg:h-screen flex flex-col gap-3 pb-3 lg:pb-0">
+        <Link to="/" className="flex items-center gap-2.5 px-4 h-14 shrink-0">
+          <Mark />
+          <span className="leading-tight">
+            <span className="block font-semibold tracking-tight text-ink">Sentinel</span>
+            <span className="block text-[11px] text-ink-3">built on Vortex</span>
           </span>
-          <div className="leading-tight">
-            <div className="font-semibold text-ink">Sentinel</div>
-            <div className="text-[11px] text-ink-3">on Vortex</div>
-          </div>
-        </div>
+        </Link>
         <nav aria-label="Main" className="px-2 flex lg:flex-col gap-0.5 overflow-x-auto">
-          {nav.map(({ to, label, Icon, end }) => (
+          {nav.map(({ to, label, Icon, end, badge }) => (
             <NavLink key={to} to={to} end={end} className={navCls}>
               <Icon className="size-4" aria-hidden />
               {label}
+              {badge > 0 && (
+                <span className="ml-auto rounded bg-crit-soft px-1.5 num text-[11px] font-medium text-crit">{badge}</span>
+              )}
             </NavLink>
           ))}
         </nav>
         <TxSearch />
-        <div className="hidden lg:flex flex-col min-h-0 flex-1 mt-5">
-          <div className="px-4 mb-1 text-[11px] font-semibold uppercase tracking-wide text-ink-3">Programs</div>
-          <div className="px-2 overflow-y-auto flex-1 space-y-0.5">
+        <div className="hidden lg:flex flex-col min-h-0 flex-1 mt-2">
+          <div className="px-4 mb-1 flex items-baseline justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-3">Programs</span>
+            <span className="text-[11px] text-ink-3">fail % · 60s</span>
+          </div>
+          <div className="px-2 overflow-y-auto flex-1 space-y-0.5 pb-4">
             {programs.length === 0 && <div className="px-2.5 text-xs text-ink-3">None yet</div>}
             {programs.map((p) => (
               <NavLink key={p.program_id} to={`/programs/${p.program_id}`} className={navCls}>
                 <HealthDot health={p.health} />
                 <span className="truncate">{p.label}</span>
-                {p.open_incidents > 0 && (
-                  <span className="ml-auto num text-xs text-crit">{p.open_incidents}</span>
-                )}
+                <span
+                  className={`ml-auto num text-xs ${
+                    p.open_incidents > 0 ? 'text-crit font-medium' : 'text-ink-3'
+                  }`}
+                >
+                  {p.tx_60s ? pct(p.failure_rate_60s, 1) : '—'}
+                </span>
               </NavLink>
             ))}
           </div>
-          <div className="p-3">
-            <StreamPanel />
-          </div>
         </div>
       </aside>
-      <main className="min-w-0 px-4 py-5 lg:px-8 lg:py-6 max-w-[1400px]">
-        <Outlet />
-      </main>
+      <div className="min-w-0">
+        <StatusBar />
+        <main className="min-w-0 px-4 py-6 lg:px-8 max-w-[1440px]">
+          <Outlet />
+        </main>
+      </div>
     </div>
   );
 }

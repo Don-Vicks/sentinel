@@ -11,9 +11,10 @@ export function compact(x: number | null | undefined) {
   const a = Math.abs(x);
   if (a >= 1e9) return `${(x / 1e9).toFixed(2)}B`;
   if (a >= 1e6) return `${(x / 1e6).toFixed(2)}M`;
+  if (a >= 1e5) return `${(x / 1e3).toFixed(0)}K`;
   if (a >= 1e4) return `${(x / 1e3).toFixed(1)}K`;
   if (a >= 100) return x.toFixed(0);
-  if (a >= 1) return x.toFixed(2);
+  if (a >= 1) return Number.isInteger(x) ? String(x) : x.toFixed(2);
   if (a === 0) return '0';
   return x.toPrecision(3);
 }
