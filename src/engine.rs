@@ -12,6 +12,7 @@ use crate::model::*;
 use crate::source::VortexSource;
 use crate::pricing::PriceBook;
 use crate::store::Store;
+use crate::writer::Writer;
 use crate::trace::{program_label, OwnerCache};
 use anyhow::{bail, Result};
 use chrono::{DateTime, TimeZone, Utc};
@@ -46,6 +47,7 @@ pub struct Sentinel {
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
     dispatcher: Dispatcher,
+    writer: Writer,
     state: Mutex<State>,
 }
 
@@ -107,6 +109,8 @@ struct OpenIncident {
     last_event: i64,
     fingerprint_counts: HashMap<String, (u64, Vec<String>)>,
     wallets: HashSet<String>,
+    /// Signatures already linked (bounded by MAX_LINKED_PER_INCIDENT).
+    linked: HashSet<String>,
     dirty: bool,
 }
 
@@ -173,6 +177,7 @@ impl Sentinel {
         }
         let idls = IdlRegistry::new(rpc.clone());
         let auth = crate::auth::Auth::new(store.clone(), &public_url);
+        let store_for_writer = store.clone();
         let this = Arc::new(Self {
             store,
             source,
@@ -184,6 +189,7 @@ impl Sentinel {
             live,
             public_url,
             dispatcher,
+            writer: Writer::spawn(store_for_writer),
             state: Mutex::new(state),
         });
         this.sync_filters();
@@ -370,7 +376,7 @@ impl Sentinel {
     ) {
         let Some(open) = ps.open.get_mut(key) else { return };
         if open.link.matches(tx, summary) {
-            link_tx(&self.store, open, tx, summary, second);
+            link_tx(&self.writer, open, tx, summary, second);
         }
     }
 
@@ -656,6 +662,7 @@ impl Sentinel {
             last_event: now,
             fingerprint_counts: HashMap::new(),
             wallets: HashSet::new(),
+            linked: HashSet::new(),
             dirty: false,
         };
         // Link the transactions already seen that belong to this incident.
@@ -667,7 +674,7 @@ impl Sentinel {
             .cloned()
             .collect();
         for (t, s) in backfill.iter().rev() {
-            link_tx(&self.store, &mut open, t, s, now);
+            link_tx(&self.writer, &mut open, t, s, now);
         }
         refresh_evidence(&mut open, &ps.fingerprints, &program_labels_one(&ps.program));
         let _ = self.store.update_incident(&open.incident);
@@ -726,7 +733,7 @@ impl Sentinel {
         let key = IncidentKind::LargeTransfer.as_str();
         let value = big.usd.unwrap_or(big.amount);
         if let Some(open) = ps.open.get_mut(key) {
-            link_tx(&self.store, open, tx, summary, second);
+            link_tx(&self.writer, open, tx, summary, second);
             open.last_event = second;
             if open.incident.peak.is_none_or(|p| value > p) {
                 open.incident.peak = Some(value);
@@ -782,7 +789,7 @@ impl Sentinel {
             .is_some()
         {
             if let Some(open) = ps.open.get_mut(key) {
-                link_tx(&self.store, open, tx, summary, second);
+                link_tx(&self.writer, open, tx, summary, second);
                 open.dirty = true;
             }
         }
@@ -810,7 +817,7 @@ impl Sentinel {
         if let Some(open) = ps.open.get_mut(&key) {
             // Already tracking this rule; attach the new evidence and stay quiet.
             if let Some((tx, s)) = trigger {
-                link_tx(&self.store, open, tx, s, now);
+                link_tx(&self.writer, open, tx, s, now);
                 open.last_event = now;
             }
             return None;
@@ -857,7 +864,7 @@ impl Sentinel {
             };
             if let Some(opened) = self.open_incident(ps, &key, incident, link, event_based, now - window, now) {
                 if let (Some((tx, s)), Some(open)) = (trigger, ps.open.get_mut(&key)) {
-                    link_tx(&self.store, open, tx, s, now);
+                    link_tx(&self.writer, open, tx, s, now);
                     open.dirty = true;
                 }
                 incident_id = Some(opened.id);
@@ -958,6 +965,11 @@ impl Sentinel {
     pub fn stream_health(&self) -> StreamHealth {
         let state = self.state.lock().unwrap();
         self.stream_health_locked(&state, Utc::now().timestamp())
+    }
+
+    /// Waits for queued incident-transaction writes to reach SQLite.
+    pub fn flush(&self) {
+        self.writer.flush();
     }
 
     pub fn allow_private_webhooks(&self) -> bool {
@@ -1236,7 +1248,11 @@ fn applies(rule: &AlertRule, program_id: &str, watchers: &HashSet<String>) -> bo
         && rule.owner.as_deref().is_none_or(|o| watchers.contains(o))
 }
 
-fn link_tx(store: &Store, open: &mut OpenIncident, tx: &Arc<VortexTransaction>, summary: &TxSummary, now: i64) {
+fn link_tx(writer: &Writer, open: &mut OpenIncident, tx: &Arc<VortexTransaction>, summary: &TxSummary, now: i64) {
+    // Backfill and live paths can offer the same transaction twice.
+    if open.linked.len() < MAX_LINKED_PER_INCIDENT as usize && !open.linked.insert(tx.signature.clone()) {
+        return;
+    }
     open.last_event = now;
     if let Some(payer) = tx.fee_payer() {
         open.wallets.insert(payer.to_string());
@@ -1248,13 +1264,10 @@ fn link_tx(store: &Store, open: &mut OpenIncident, tx: &Arc<VortexTransaction>, 
             entry.1.push(tx.signature.clone());
         }
     }
-    let stored = open.incident.affected_count < MAX_LINKED_PER_INCIDENT
-        && store
-            .link_transaction(open.incident.id, summary, tx)
-            .unwrap_or(false);
-    if stored || open.incident.affected_count >= MAX_LINKED_PER_INCIDENT {
-        open.incident.affected_count += 1;
+    if open.incident.affected_count < MAX_LINKED_PER_INCIDENT {
+        writer.link(open.incident.id, summary.clone(), tx.clone());
     }
+    open.incident.affected_count += 1;
     open.incident.affected_wallets = open.wallets.len() as i64;
     open.dirty = true;
 }

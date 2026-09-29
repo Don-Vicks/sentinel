@@ -247,6 +247,28 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Stores many links in one SQLite transaction; duplicates are ignored.
+    pub fn link_transactions(&self, links: &[(i64, TxSummary, std::sync::Arc<VortexTransaction>)]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let t = conn.transaction()?;
+        {
+            let mut stmt = t.prepare(
+                "INSERT OR IGNORE INTO incident_transactions(incident_id, signature, summary, tx)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            for (id, summary, tx) in links {
+                stmt.execute(params![
+                    id,
+                    tx.signature,
+                    serde_json::to_string(summary)?,
+                    serde_json::to_string(tx.as_ref())?
+                ])?;
+            }
+        }
+        t.commit()?;
+        Ok(())
+    }
+
     pub fn incident_transactions(&self, incident_id: i64, limit: i64) -> Result<Vec<TxSummary>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

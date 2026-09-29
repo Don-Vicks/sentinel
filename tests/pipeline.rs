@@ -150,6 +150,7 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
         .expect("failure spike incident");
     assert_eq!(inc.status, IncidentStatus::Open);
     assert!(inc.affected_count >= 50, "linked {} failed txs", inc.affected_count);
+    s.flush();
     let linked = store.incident_transactions(inc.id, 500).unwrap();
     assert!(linked.iter().all(|t| !t.success));
     let top = &inc.evidence["fingerprints"][0];
@@ -254,6 +255,7 @@ async fn new_error_type_opens_incident_while_failure_rate_is_flat() {
         .expect("error spike incident");
     assert!(inc.title.starts_with("New error"), "{}", inc.title);
     assert!(inc.summary.contains("AccountNotInitialized"), "{}", inc.summary);
+    s.flush();
     let linked = store.incident_transactions(inc.id, 100).unwrap();
     assert!(!linked.is_empty());
     assert!(linked.iter().all(|t| t.error.as_deref() == Some("AccountNotInitialized")));

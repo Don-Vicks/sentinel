@@ -19,3 +19,4 @@ pub mod pricing;
 pub mod source;
 pub mod store;
 pub mod trace;
+pub mod writer;

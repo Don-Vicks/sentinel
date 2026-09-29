@@ -173,6 +173,7 @@ async fn usd_large_transfer_detection_and_rule() {
         .find(|i| i.kind == IncidentKind::RuleTriggered)
         .expect("usd rule incident");
     assert!(rule_inc.summary.contains("USDC") && rule_inc.summary.contains("$150"), "{}", rule_inc.summary);
+    s.flush();
     assert_eq!(store.incident_transactions(rule_inc.id, 10).unwrap()[0].signature, "usdc");
     let _ = std::fs::remove_file(&db);
 }
