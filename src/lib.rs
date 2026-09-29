@@ -11,6 +11,7 @@ pub mod api;
 pub mod detect;
 pub mod engine;
 pub mod idl;
+pub mod limits;
 pub mod live;
 pub mod metrics;
 pub mod simulate;

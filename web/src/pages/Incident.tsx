@@ -30,6 +30,7 @@ export function Incident() {
     transactions: TxSummary[];
   }>(`/api/incidents/${id}`);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const { account, requestSignIn } = useAuth();
 
   useLive((e) => {
@@ -51,9 +52,12 @@ export function Incident() {
   const setStatus = async (status: IncidentStatus) => {
     if (!account) return requestSignIn();
     setBusy(true);
+    setActionError(null);
     try {
       const updated = await send<IncidentT>('PATCH', `/api/incidents/${inc.id}`, { status });
       setData((d) => (d ? { ...d, incident: updated } : d));
+    } catch (e) {
+      setActionError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -94,6 +98,12 @@ export function Incident() {
           )
         }
       />
+
+      {actionError && (
+        <p className="rounded-md bg-crit-soft px-3 py-2 text-sm text-crit" role="alert">
+          {actionError}
+        </p>
+      )}
 
       <div className="panel p-4">
         <h2 className="panel-title mb-2">Why this fired</h2>

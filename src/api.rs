@@ -63,6 +63,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/rules/{id}/test", post(test_rule))
         .route("/api/alerts", get(list_alerts))
         .route("/api/stream", get(stream))
+        .layer(axum::middleware::from_fn_with_state(sentinel.clone(), crate::limits::rate_limit))
         .with_state(sentinel)
 }
 
@@ -139,7 +140,15 @@ async fn add_program(
     Account(account): Account,
     Json(body): Json<AddProgram>,
 ) -> ApiResult<Value> {
-    let p = s.watch(&account, body.program_id.trim().to_string(), body.label)?;
+    let program_id = body.program_id.trim().to_string();
+    let watching = s.watching(&account);
+    if !s.limits.is_admin(&account) && !watching.contains(&program_id) && watching.len() >= s.limits.max_watched {
+        return Err(forbidden(&format!(
+            "Your watchlist is full ({} programs). Remove one first.",
+            s.limits.max_watched
+        )));
+    }
+    let p = s.watch(&account, program_id, body.label)?;
     Ok(Json(json!(p)))
 }
 
@@ -161,8 +170,9 @@ async fn update_program(
     Path(id): Path<String>,
     Json(body): Json<UpdateProgram>,
 ) -> ApiResult<Value> {
-    if !s.is_watching(&account, &id) {
-        return Err(forbidden("Watch this program before changing its settings"));
+    // Detection settings are shared by everyone watching the program.
+    if !s.limits.is_admin(&account) {
+        return Err(forbidden("Only the operator can change shared detection settings"));
     }
     Ok(Json(json!(s.update_program(&id, body.label, body.detection)?)))
 }
@@ -226,10 +236,14 @@ struct UpdateIncident {
 
 async fn update_incident(
     State(s): State<AppState>,
-    Account(_): Account,
+    Account(account): Account,
     Path(id): Path<i64>,
     Json(body): Json<UpdateIncident>,
 ) -> ApiResult<Value> {
+    let incident = s.store.incident(id)?.ok_or_else(|| not_found("incident"))?;
+    if !s.limits.is_admin(&account) && !s.is_watching(&account, &incident.program_id) {
+        return Err(forbidden("Watch this program to update its incidents"));
+    }
     Ok(Json(json!(s.set_incident_status(id, body.status)?)))
 }
 
@@ -321,6 +335,10 @@ async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), 
 }
 
 async fn create_rule(State(s): State<AppState>, Account(account): Account, Json(input): Json<RuleInput>) -> ApiResult<Value> {
+    let owned = s.store.rules()?.iter().filter(|r| r.owner.as_deref() == Some(account.as_str())).count();
+    if !s.limits.is_admin(&account) && owned >= s.limits.max_rules {
+        return Err(forbidden(&format!("You have the maximum of {} rules. Delete one first.", s.limits.max_rules)));
+    }
     validate(&s, &account, &input).await?;
     let rule = s.store.create_rule(AlertRule {
         id: 0,

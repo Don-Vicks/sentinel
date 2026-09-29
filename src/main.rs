@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         .layer(CorsLayer::permissive());
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     tracing::info!("Vortex Sentinel on {public_url}");
-    axum::serve(listener, app).await?;
+    // Client addresses feed the per-IP rate limits.
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
     Ok(())
 }

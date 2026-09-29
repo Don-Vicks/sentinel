@@ -112,6 +112,11 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SENTINEL_PORT` | `8080` | HTTP port (API + dashboard) |
 | `SENTINEL_DB` | `sentinel.db` | SQLite file |
 | `SENTINEL_PUBLIC_URL` | `http://localhost:8080` | Base URL for incident links in webhooks |
+| `SENTINEL_ADMINS` | — | Comma-separated operator wallets. Only they can change shared detection settings, and they skip the caps below |
+| `SENTINEL_MAX_WATCHED` | `10` | Programs one wallet can watch |
+| `SENTINEL_MAX_RULES` | `25` | Alert rules one wallet can own |
+| `SENTINEL_AUTH_PER_MIN` / `SENTINEL_WRITES_PER_MIN` | `20` / `60` | Per-IP limits on sign-in requests and on everything that writes |
+| `SENTINEL_TRUST_PROXY` | — | `1` to take the client IP from `X-Forwarded-For` (behind a reverse proxy) |
 | `SENTINEL_ALLOW_PRIVATE_WEBHOOKS` | — | `1` allows webhooks to private and loopback addresses (local dev only; blocked by default) |
 | `SENTINEL_SIMULATE` | — | **Dev only.** Program ID to feed with synthetic traffic instead of gRPC |
 
@@ -160,7 +165,7 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 | GET | `/api/alerts` | Your webhook deliveries 🔒 |
 | GET | `/api/stream?program=` | SSE: `transactions`, `metrics`, `incident`, `alert`, `stream` |
 
-🔒 requires a session (wallet sign-in). Incident status changes (`PATCH /api/incidents/{id}`) do too.
+🔒 requires a session (wallet sign-in). Changing an incident's status requires watching its program. Changing a program's detection settings is operator-only (`SENTINEL_ADMINS`), since everyone watching it shares them.
 
 Webhook payloads are JSON with `event` (`sentinel.alert`, `sentinel.incident`, `sentinel.test`), `rule`, `severity`, `program`, `message`, `incident` and `links.incident`. Each request carries an `X-Sentinel-Delivery` id for idempotency.
 
@@ -183,6 +188,8 @@ cargo test
 - one account can't see or delete another's rules, or target programs it doesn't watch
 - rules fire only on their owner's programs
 - webhooks to private networks are refused
+
+`tests/limits.rs` covers the public-instance guards: watchlist and rule caps (the operator is exempt), operator-only detection settings, watcher-only incident updates, per-IP rate limits, and capped sign-in challenges.
 
 `tests/pipeline.rs` drives the real engine through a full cycle:
 - healthy baseline

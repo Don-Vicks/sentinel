@@ -17,6 +17,9 @@ use std::sync::{Arc, Mutex};
 
 pub const COOKIE: &str = "sentinel_session";
 const CHALLENGE_TTL_MINS: i64 = 5;
+/// Pending sign-in requests kept per address, and in total.
+const MAX_CHALLENGES_PER_KEY: usize = 3;
+const MAX_CHALLENGES: usize = 10_000;
 pub const SESSION_DAYS: i64 = 30;
 
 struct Challenge {
@@ -80,6 +83,21 @@ impl Auth {
         );
         let mut challenges = self.challenges.lock().unwrap();
         challenges.retain(|_, c| c.expires > now);
+        // Keep only the newest few per address; a new request supersedes old ones.
+        let mut mine: Vec<(String, DateTime<Utc>)> = challenges
+            .iter()
+            .filter(|(_, c)| c.pubkey == pubkey)
+            .map(|(n, c)| (n.clone(), c.expires))
+            .collect();
+        if mine.len() >= MAX_CHALLENGES_PER_KEY {
+            mine.sort_by_key(|(_, e)| *e);
+            for (n, _) in mine.iter().take(mine.len() + 1 - MAX_CHALLENGES_PER_KEY) {
+                challenges.remove(n);
+            }
+        }
+        if challenges.len() >= MAX_CHALLENGES {
+            bail!("Too many sign-in requests right now; try again in a few minutes");
+        }
         challenges.insert(
             nonce,
             Challenge {

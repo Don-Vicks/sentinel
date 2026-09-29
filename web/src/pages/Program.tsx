@@ -94,6 +94,7 @@ export function Program() {
   const { reload: reloadPrograms } = usePrograms();
   const { account, watching, refresh: refreshAuth, requestSignIn } = useAuth();
   const [watchBusy, setWatchBusy] = useState(false);
+  const [watchError, setWatchError] = useState<string | null>(null);
   const { data, setData, error, loading, reload } = useFetch<Detail>(`/api/programs/${id}`);
   const [paused, setPaused] = useState(false);
   const [failedOnly, setFailedOnly] = useState(false);
@@ -150,6 +151,7 @@ export function Program() {
   const toggleWatch = async () => {
     if (!account) return requestSignIn();
     setWatchBusy(true);
+    setWatchError(null);
     try {
       if (isWatching) {
         await send('DELETE', `/api/programs/${id}`);
@@ -162,6 +164,8 @@ export function Program() {
         const still = await fetch(`/api/programs/${id}`);
         if (!still.ok) navigate('/');
       }
+    } catch (e) {
+      setWatchError((e as Error).message);
     } finally {
       setWatchBusy(false);
     }
@@ -205,6 +209,12 @@ export function Program() {
           </button>
         }
       />
+
+      {watchError && (
+        <p className="rounded-md bg-crit-soft px-3 py-2 text-sm text-crit" role="alert">
+          {watchError}
+        </p>
+      )}
 
       {open.length > 0 && <IncidentBanner incidents={open} />}
 
