@@ -7,6 +7,7 @@ import { HealthDot } from './ui';
 import { AccountChip } from './SignIn';
 import { useAuth } from '../lib/auth';
 import { compact, num, pct } from '../lib/format';
+import { parseQuery } from '../lib/query';
 
 /** Sentinel mark: a radar sweep over a program's signal. */
 export function Mark({ className = 'size-7' }: { className?: string }) {
@@ -102,17 +103,19 @@ function StatusBar() {
 function TxSearch() {
   const navigate = useNavigate();
   const [sig, setSig] = useState('');
+  const [bad, setBad] = useState(false);
   return (
     <form
       role="search"
       className="relative px-3"
       onSubmit={(e) => {
         e.preventDefault();
-        const v = sig.trim();
-        if (v) {
-          navigate(`/tx/${v}`);
-          setSig('');
-        }
+        if (!sig.trim()) return;
+        const q = parseQuery(sig);
+        if (!q) return setBad(true);
+        // A signature is investigated; an address (program or authority) goes to the finder.
+        navigate(q.kind === 'signature' ? `/tx/${q.value}` : `/?find=${q.value}`);
+        setSig('');
       }}
     >
       <label htmlFor="tx-search" className="sr-only">Investigate a transaction signature</label>
@@ -120,12 +123,21 @@ function TxSearch() {
       <input
         id="tx-search"
         className="input pl-8 font-mono text-xs"
-        placeholder="Investigate a signature"
+        placeholder="Signature, program or address"
+        aria-invalid={bad}
         value={sig}
-        onChange={(e) => setSig(e.target.value)}
+        onChange={(e) => {
+          setSig(e.target.value);
+          setBad(false);
+        }}
         autoComplete="off"
         spellCheck={false}
       />
+      {bad && (
+        <p className="mt-1 text-xs text-crit" role="alert">
+          Not a Solana signature or address
+        </p>
+      )}
     </form>
   );
 }

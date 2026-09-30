@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { Crosshair, Plus, Radar, Siren, Star, X, Zap } from 'lucide-react';
 import { useFetch } from '../lib/api';
 import { usePrograms } from '../lib/programs';
@@ -18,7 +18,7 @@ const STEPS = [
   { icon: Crosshair, title: 'Investigate', text: 'Each incident links to the exact transactions, decoded instructions and accounts involved.' },
 ];
 
-function Hero() {
+function Hero({ initial }: { initial?: string }) {
   return (
     <section className="panel overflow-hidden">
       <div className="px-5 pt-6 pb-2 md:px-8 md:pt-8">
@@ -32,7 +32,7 @@ function Hero() {
           Sentinel watches every transaction your program receives, flags trouble the moment it starts, and shows you what went wrong.
         </p>
       </div>
-      <Finder />
+      <Finder initial={initial} />
       <div className="grid gap-px border-t border-line bg-line md:grid-cols-3">
         {STEPS.map((s) => (
           <div key={s.title} className="bg-surface px-5 py-4 md:px-8">
@@ -111,6 +111,8 @@ function ProgramRow({ p, series, mine }: { p: ProgramSnapshot; series: SeriesPoi
 export function Overview() {
   const { programs, series, loading, error, reload } = usePrograms();
   const { account, watching } = useAuth();
+  const [params] = useSearchParams();
+  const find = params.get('find') ?? undefined;
   const [adding, setAdding] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false);
   const mine = new Set(watching);
@@ -133,11 +135,11 @@ export function Overview() {
   ]
     .filter(Boolean)
     .join(' · ');
-  const showForm = adding || (!loading && !error && programs.length === 0);
+  const showForm = adding || (!!account && !!find) || (!loading && !error && programs.length === 0);
 
   return (
     <div className="space-y-6">
-      {!account && !loading && <Hero />}
+      {!account && !loading && <Hero initial={find} />}
       <PageHeader
         title={account ? 'Overview' : 'Live programs'}
         meta="Program health on Solana mainnet, streamed through Vortex."
@@ -157,7 +159,7 @@ export function Overview() {
 
       {showForm && (
         <Panel title="Find programs to watch">
-          <Finder onDone={() => setAdding(false)} />
+          <Finder initial={find} onDone={() => setAdding(false)} />
         </Panel>
       )}
 

@@ -16,11 +16,11 @@ const HINTS: Record<Resolution['kind'], string> = {
 };
 
 /** One box: paste a program, an upgrade-authority address, a signature or an explorer link. */
-export function Finder({ onDone }: { onDone?: () => void }) {
+export function Finder({ onDone, initial }: { onDone?: () => void; initial?: string }) {
   const { account, watching, requestSignIn, refresh } = useAuth();
   const { reload } = usePrograms();
   const navigate = useNavigate();
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useState(initial ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Resolution | null>(null);
@@ -34,12 +34,12 @@ export function Finder({ onDone }: { onDone?: () => void }) {
     return () => clearTimeout(t);
   }, [busy, found]);
 
-  const look = async () => {
+  const look = async (q = query) => {
     setBusy(true);
     setError(null);
     setFound(null);
     try {
-      const r = await send<Resolution>('POST', '/api/resolve', { query });
+      const r = await send<Resolution>('POST', '/api/resolve', { query: q });
       setFound(r);
       const mine = new Set(watching);
       // Preselect the application programs, not System/Token plumbing.
@@ -50,6 +50,14 @@ export function Finder({ onDone }: { onDone?: () => void }) {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (initial) {
+      setQuery(initial);
+      look(initial);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial]);
 
   const watch = async () => {
     if (!account) return requestSignIn();
@@ -116,7 +124,7 @@ export function Finder({ onDone }: { onDone?: () => void }) {
           placeholder="Program, authority, tx or link"
           autoComplete="off"
           spellCheck={false}
-          autoFocus
+          autoFocus={!initial}
         />
         <button className="btn-primary" disabled={busy || !query.trim()}>
           {busy && !found ? <Spinner /> : <Search className="size-4" aria-hidden />}
