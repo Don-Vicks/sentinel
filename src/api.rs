@@ -48,6 +48,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
         .route("/api/status", get(status))
+        .route("/api/resolve", post(resolve))
         .route("/api/programs", get(list_programs).post(add_program))
         .route(
             "/api/programs/{id}",
@@ -150,6 +151,37 @@ async fn add_program(
     }
     let p = s.watch(&account, program_id, body.label)?;
     Ok(Json(json!(p)))
+}
+
+#[derive(Deserialize)]
+struct ResolveQuery {
+    query: String,
+}
+
+/// Works out what was pasted (program, authority, signature, explorer link)
+/// and which programs it points at. Public data only; no sign-in needed.
+async fn resolve(State(s): State<AppState>, Json(body): Json<ResolveQuery>) -> ApiResult<Value> {
+    use crate::resolve::{parse_query, resolve_address, resolve_transaction, Query};
+    let q = parse_query(&body.query)?;
+    let lookup = async {
+        match q {
+            Query::Signature(sig) => {
+                let tx = s
+                    .transaction(&sig)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("Transaction not found on mainnet"))?;
+                Ok(resolve_transaction(&sig, &tx))
+            }
+            Query::Address(addr) => {
+                let rpc = s.rpc.as_ref().ok_or_else(|| anyhow::anyhow!("Lookups need an RPC endpoint configured"))?;
+                resolve_address(rpc, &addr).await
+            }
+        }
+    };
+    let found = tokio::time::timeout(std::time::Duration::from_secs(20), lookup)
+        .await
+        .map_err(|_| ApiError(StatusCode::GATEWAY_TIMEOUT, "The lookup timed out; try again".into()))??;
+    Ok(Json(json!(found)))
 }
 
 async fn get_program(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {

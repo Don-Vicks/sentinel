@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod simulate;
 pub mod model;
 pub mod pricing;
+pub mod resolve;
 pub mod source;
 pub mod store;
 pub mod trace;

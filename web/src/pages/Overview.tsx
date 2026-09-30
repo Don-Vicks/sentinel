@@ -1,103 +1,16 @@
 import { useState } from 'react';
-import { Link, useNavigate } from 'react-router';
+import { Link } from 'react-router';
 import { Plus, Radar, Star, X } from 'lucide-react';
-import { send, useFetch } from '../lib/api';
+import { useFetch } from '../lib/api';
 import { usePrograms } from '../lib/programs';
 import { useAuth } from '../lib/auth';
 import { useLive } from '../lib/live';
-import type { Incident, MonitoredProgram, ProgramSnapshot, SeriesPoint } from '../lib/types';
+import type { Incident, ProgramSnapshot, SeriesPoint } from '../lib/types';
 import { compact, num, pct, short } from '../lib/format';
-import { Empty, ErrorState, HealthDot, PageHeader, Panel, Skeleton, Spinner, Stat } from '../components/ui';
+import { Empty, ErrorState, HealthDot, PageHeader, Panel, Skeleton, Stat } from '../components/ui';
 import { Sparkline } from '../components/charts';
+import { Finder } from '../components/Finder';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
-
-const SUGGESTED = [
-  { id: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P', label: 'Pump.fun' },
-  { id: 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA', label: 'PumpSwap AMM' },
-  { id: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', label: 'Jupiter v6' },
-  { id: 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc', label: 'Orca Whirlpool' },
-];
-
-function AddProgram({ onDone }: { onDone?: () => void }) {
-  const { reload } = usePrograms();
-  const { refresh: refreshAuth, watching } = useAuth();
-  const navigate = useNavigate();
-  const [id, setId] = useState('');
-  const [label, setLabel] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const add = async (programId: string, programLabel?: string) => {
-    setBusy(true);
-    setError(null);
-    try {
-      const p = await send<MonitoredProgram>('POST', '/api/programs', {
-        program_id: programId.trim(),
-        label: programLabel?.trim() || undefined,
-      });
-      await Promise.all([reload(), refreshAuth()]);
-      onDone?.();
-      navigate(`/programs/${p.program_id}`);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const watched = new Set(watching);
-  const suggestions = SUGGESTED.filter((s) => !watched.has(s.id));
-  return (
-    <div className="p-4 space-y-3">
-      <form
-        className="grid gap-3 md:grid-cols-[2fr_1fr_auto] md:items-end"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (id.trim()) add(id, label);
-        }}
-      >
-        <div>
-          <label className="label" htmlFor="program-id">Program or account address (added to your watchlist)</label>
-          <input
-            id="program-id"
-            className="input font-mono"
-            value={id}
-            onChange={(e) => setId(e.target.value)}
-            placeholder="6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
-            autoComplete="off"
-            spellCheck={false}
-            autoFocus
-            aria-invalid={!!error}
-            aria-describedby={error ? 'program-error' : undefined}
-          />
-        </div>
-        <div>
-          <label className="label" htmlFor="program-label">Name (optional)</label>
-          <input id="program-label" className="input" value={label} onChange={(e) => setLabel(e.target.value)} autoComplete="off" />
-        </div>
-        <button className="btn-primary" disabled={busy || !id.trim()}>
-          {busy ? <Spinner /> : <Plus className="size-4" aria-hidden />}
-          Start monitoring
-        </button>
-      </form>
-      {error && (
-        <p id="program-error" className="text-sm text-crit" role="alert">
-          {error}
-        </p>
-      )}
-      {suggestions.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <span className="text-ink-3">Busy mainnet programs:</span>
-          {suggestions.map((s) => (
-            <button key={s.id} type="button" className="btn h-8 text-xs" disabled={busy} onClick={() => add(s.id, s.label)}>
-              {s.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 function failTone(p: ProgramSnapshot) {
   if (p.tx_60s < 20) return '';
@@ -162,7 +75,7 @@ function ProgramRow({ p, series, mine }: { p: ProgramSnapshot; series: SeriesPoi
 
 export function Overview() {
   const { programs, series, loading, error, reload } = usePrograms();
-  const { account, watching, requestSignIn } = useAuth();
+  const { account, watching } = useAuth();
   const [adding, setAdding] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false);
   const mine = new Set(watching);
@@ -185,7 +98,7 @@ export function Overview() {
   ]
     .filter(Boolean)
     .join(' · ');
-  const showForm = !!account && (adding || (!loading && !error && programs.length === 0));
+  const showForm = adding || (!loading && !error && programs.length === 0);
 
   return (
     <div className="space-y-6">
@@ -196,19 +109,19 @@ export function Overview() {
           (programs.length > 0 || !account) && (
             <button
               className={adding ? 'btn' : 'btn-primary'}
-              onClick={() => (account ? setAdding((a) => !a) : requestSignIn())}
+              onClick={() => setAdding((a) => !a)}
               aria-expanded={adding}
             >
               {adding ? <X className="size-4" aria-hidden /> : <Plus className="size-4" aria-hidden />}
-              {adding ? 'Cancel' : 'Monitor a program'}
+              {adding ? 'Cancel' : 'Find programs'}
             </button>
           )
         }
       />
 
       {showForm && (
-        <Panel title="Monitor a program">
-          <AddProgram onDone={() => setAdding(false)} />
+        <Panel title="Find programs to watch">
+          <Finder onDone={() => setAdding(false)} />
         </Panel>
       )}
 
@@ -233,9 +146,7 @@ export function Overview() {
       ) : programs.length === 0 ? (
         <div className="panel">
           <Empty title="No programs monitored" icon={<Radar className="size-6" aria-hidden />}>
-            {account
-              ? 'Add a program above. Sentinel starts streaming its transactions immediately and learns a baseline over the first two minutes.'
-              : 'Sign in with your wallet to add a program to your watchlist.'}
+            Paste a program, an upgrade-authority address or a transaction above. Sentinel starts streaming immediately and learns a baseline over the first two minutes.
           </Empty>
         </div>
       ) : (

@@ -24,6 +24,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 chrono = { version = "0.4", features = ["serde"] }
 solana-client = "1.18"
+solana-account-decoder = "1.18"
 solana-sdk = "1.18"
 axum = "0.8.9"
 tower-http = { version = "0.7.0", features = ["cors", "fs"] }

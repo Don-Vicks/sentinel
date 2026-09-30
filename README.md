@@ -153,6 +153,7 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 | POST | `/api/auth/verify` | `{pubkey, message, signature}` → session cookie |
 | POST / GET | `/api/auth/logout`, `/api/auth/me` | End the session / current account and watchlist |
 | GET | `/api/status` | Stream health + every program snapshot |
+| POST | `/api/resolve` | Paste a program, upgrade-authority address, signature or explorer link; returns the programs it points at `{query}` (public data, no sign-in) |
 | GET/POST | `/api/programs` | List / add to your watchlist `{program_id, label?}` 🔒 |
 | GET/PATCH/DELETE | `/api/programs/{id}` | Detail (snapshot, 10-min series, recent tx, incidents) / update settings 🔒 / remove from your watchlist 🔒 |
 | GET | `/api/programs/{id}/transactions?failed=true` | Recent transactions |

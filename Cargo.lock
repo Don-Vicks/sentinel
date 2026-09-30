@@ -5675,6 +5675,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "solana-account-decoder",
  "solana-client",
  "solana-sdk",
  "solana-vortex",

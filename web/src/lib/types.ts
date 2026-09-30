@@ -332,3 +332,16 @@ export interface TransactionDetail {
   program_labels: Record<string, string>;
   incidents: number[];
 }
+
+export interface Candidate {
+  program_id: string;
+  name: string | null;
+  infra: boolean;
+}
+
+export interface Resolution {
+  kind: 'program' | 'authority' | 'transaction' | 'account';
+  subject: string;
+  headline: string;
+  programs: Candidate[];
+}
