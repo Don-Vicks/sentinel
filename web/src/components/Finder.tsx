@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { Check, Search } from 'lucide-react';
 import { send } from '../lib/api';
@@ -25,6 +25,14 @@ export function Finder({ onDone }: { onDone?: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [found, setFound] = useState<Resolution | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
+
+  // Reading a whole authority off a busy RPC can take a while; say so instead of spinning silently.
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!busy || found) return setSlow(false);
+    const t = setTimeout(() => setSlow(true), 3000);
+    return () => clearTimeout(t);
+  }, [busy, found]);
 
   const look = async () => {
     setBusy(true);
@@ -105,7 +113,7 @@ export function Finder({ onDone }: { onDone?: () => void }) {
           aria-label="Program, wallet, transaction or explorer link"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Paste a program, upgrade-authority address, transaction or explorer link"
+          placeholder="Program, authority, tx or link"
           autoComplete="off"
           spellCheck={false}
           autoFocus
@@ -118,6 +126,11 @@ export function Finder({ onDone }: { onDone?: () => void }) {
       <p className="text-xs text-ink-3">
         Deploying several programs? Paste your upgrade-authority address and we list everything it can upgrade. Everything read is public; no signature from that key.
       </p>
+      {slow && (
+        <p className="text-xs text-ink-2" role="status">
+          Reading the chain. Looking up every program an address can upgrade takes a few seconds the first time.
+        </p>
+      )}
       {error && (
         <p className="text-sm text-crit" role="alert">
           {error}

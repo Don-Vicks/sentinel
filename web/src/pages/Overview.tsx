@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link } from 'react-router';
-import { Plus, Radar, Star, X } from 'lucide-react';
+import { Crosshair, Plus, Radar, Siren, Star, X, Zap } from 'lucide-react';
 import { useFetch } from '../lib/api';
 import { usePrograms } from '../lib/programs';
 import { useAuth } from '../lib/auth';
@@ -11,6 +11,41 @@ import { Empty, ErrorState, HealthDot, PageHeader, Panel, Skeleton, Stat } from 
 import { Sparkline } from '../components/charts';
 import { Finder } from '../components/Finder';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
+
+const STEPS = [
+  { icon: Radar, title: 'Watch', text: 'Every transaction your program receives, live from the chain.' },
+  { icon: Siren, title: 'Detect', text: 'Failure spikes, traffic drops and new errors, judged against the program’s own normal.' },
+  { icon: Crosshair, title: 'Investigate', text: 'Each incident links to the exact transactions, decoded instructions and accounts involved.' },
+];
+
+function Hero() {
+  return (
+    <section className="panel overflow-hidden">
+      <div className="px-5 pt-6 pb-2 md:px-8 md:pt-8">
+        <p className="inline-flex items-center gap-1.5 rounded-full border border-line-strong px-2.5 py-1 text-xs text-ink-2">
+          <Zap className="size-3 text-accent" aria-hidden /> Live on Solana mainnet
+        </p>
+        <h1 className="mt-3 max-w-2xl text-2xl font-semibold tracking-tight text-ink md:text-3xl">
+          Know when your Solana program breaks, before your users tell you.
+        </h1>
+        <p className="mt-2 max-w-2xl text-sm text-ink-2 md:text-base">
+          Sentinel watches every transaction your program receives, flags trouble the moment it starts, and shows you what went wrong.
+        </p>
+      </div>
+      <Finder />
+      <div className="grid gap-px border-t border-line bg-line md:grid-cols-3">
+        {STEPS.map((s) => (
+          <div key={s.title} className="bg-surface px-5 py-4 md:px-8">
+            <p className="flex items-center gap-2 text-sm font-medium text-ink">
+              <s.icon className="size-4 text-accent" aria-hidden /> {s.title}
+            </p>
+            <p className="mt-1 text-xs text-ink-2">{s.text}</p>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function failTone(p: ProgramSnapshot) {
   if (p.tx_60s < 20) return '';
@@ -102,11 +137,12 @@ export function Overview() {
 
   return (
     <div className="space-y-6">
+      {!account && !loading && <Hero />}
       <PageHeader
-        title="Overview"
+        title={account ? 'Overview' : 'Live programs'}
         meta="Program health on Solana mainnet, streamed through Vortex."
         actions={
-          (programs.length > 0 || !account) && (
+          account && programs.length > 0 && (
             <button
               className={adding ? 'btn' : 'btn-primary'}
               onClick={() => setAdding((a) => !a)}

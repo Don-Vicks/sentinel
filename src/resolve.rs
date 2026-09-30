@@ -11,7 +11,9 @@ use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_client::rpc_filter::{Memcmp, RpcFilterType};
 use solana_sdk::pubkey::Pubkey;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use std::str::FromStr;
 use vortex::events::programs::known_name;
 use vortex::events::VortexTransaction;
@@ -81,7 +83,7 @@ pub struct Candidate {
     pub infra: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct Resolution {
     /// "program", "authority", "transaction" or "account".
     pub kind: &'static str,
@@ -89,6 +91,21 @@ pub struct Resolution {
     pub subject: String,
     pub headline: String,
     pub programs: Vec<Candidate>,
+}
+
+/// A ProgramData account never changes which program it belongs to, so this is kept for good.
+/// Lookups that finish before a timeout still count toward the next attempt.
+fn program_of() -> &'static Mutex<HashMap<Pubkey, Pubkey>> {
+    static M: OnceLock<Mutex<HashMap<Pubkey, Pubkey>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+const RESULT_TTL: Duration = Duration::from_secs(600);
+const MAX_CACHED: usize = 500;
+
+fn results() -> &'static Mutex<HashMap<String, (Instant, Resolution)>> {
+    static M: OnceLock<Mutex<HashMap<String, (Instant, Resolution)>>> = OnceLock::new();
+    M.get_or_init(Default::default)
 }
 
 fn candidate(id: &str) -> Candidate {
@@ -159,6 +176,9 @@ pub async fn programs_by_authority(rpc: &RpcClient, authority: &Pubkey) -> Resul
     let data_addrs: Vec<Pubkey> = data_accounts.into_iter().take(MAX_FOUND).map(|(k, _)| k).collect();
     let results: Vec<Option<Pubkey>> = stream::iter(data_addrs.into_iter().map(|data_addr| {
         async move {
+            if let Some(p) = program_of().lock().unwrap().get(&data_addr) {
+                return Some(*p);
+            }
             for attempt in 0..3u64 {
                 let mut cfg = ids_only();
                 cfg.filters = Some(vec![
@@ -166,7 +186,11 @@ pub async fn programs_by_authority(rpc: &RpcClient, authority: &Pubkey) -> Resul
                     RpcFilterType::Memcmp(Memcmp::new_base58_encoded(4, data_addr.as_ref())),
                 ]);
                 if let Ok(v) = rpc.get_program_accounts_with_config(&loader, cfg).await {
-                    return v.into_iter().next().map(|(program, _)| program);
+                    let program = v.into_iter().next().map(|(program, _)| program);
+                    if let Some(p) = program {
+                        program_of().lock().unwrap().insert(data_addr, p);
+                    }
+                    return program;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt + 1))).await;
             }
@@ -183,6 +207,26 @@ pub async fn programs_by_authority(rpc: &RpcClient, authority: &Pubkey) -> Resul
 }
 
 pub async fn resolve_address(rpc: &RpcClient, address: &str) -> Result<Resolution> {
+    if let Some((at, r)) = results().lock().unwrap().get(address) {
+        if at.elapsed() < RESULT_TTL {
+            return Ok(r.clone());
+        }
+    }
+    let r = lookup_address(rpc, address).await?;
+    // Incomplete answers aren't kept, so searching again finishes the job.
+    if !r.headline.contains("couldn't be loaded") {
+        let mut cache = results().lock().unwrap();
+        if cache.len() >= MAX_CACHED {
+            cache.retain(|_, (at, _)| at.elapsed() < RESULT_TTL);
+        }
+        if cache.len() < MAX_CACHED {
+            cache.insert(address.to_string(), (Instant::now(), r.clone()));
+        }
+    }
+    Ok(r)
+}
+
+async fn lookup_address(rpc: &RpcClient, address: &str) -> Result<Resolution> {
     let key = Pubkey::from_str(address)?;
     let account = rpc.get_account(&key).await.ok();
     if let Some(a) = &account {
