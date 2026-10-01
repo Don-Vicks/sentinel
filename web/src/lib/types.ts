@@ -152,6 +152,8 @@ export interface StreamHealth {
   dropped: number;
   programs_streamed: string[];
   uptime_secs: number;
+  /** Which Solami transport carries the stream; mirage means gRPC failed over. */
+  transport?: 'grpc' | 'mirage';
   pricing: {
     enabled: boolean;
     priced_mints: number;
@@ -331,6 +333,19 @@ export interface TransactionDetail {
   monitored_programs: string[];
   program_labels: Record<string, string>;
   incidents: number[];
+  beam?: { landing: BeamLanding | null; tip: { lamports: number; address: string } | null };
+}
+
+/** How Solami Beam delivered a transaction it carried. */
+export interface BeamLanding {
+  is_landed: boolean;
+  landed_via_jito: boolean;
+  rebroadcasted: boolean;
+  region: string | null;
+  tip_lamports: number | null;
+  tip_address: string | null;
+  first_seen_ms: number | null;
+  forwarded_ms: number | null;
 }
 
 export interface Candidate {

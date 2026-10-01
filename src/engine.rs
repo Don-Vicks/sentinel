@@ -43,6 +43,7 @@ pub struct Sentinel {
     pub owners: OwnerCache,
     pub prices: Arc<PriceBook>,
     pub idls: Arc<IdlRegistry>,
+    pub beam: crate::beam::BeamClient,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
@@ -185,6 +186,7 @@ impl Sentinel {
             rpc,
             owners: OwnerCache::default(),
             idls,
+            beam: crate::beam::BeamClient::new(),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
@@ -960,6 +962,7 @@ impl Sentinel {
             dropped: state.dropped,
             programs_streamed: hub.programs,
             uptime_secs: (Utc::now() - hub.started_at).num_seconds(),
+            transport: self.source.transport(),
             pricing: self.prices.status(),
         }
     }

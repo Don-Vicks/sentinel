@@ -289,11 +289,19 @@ async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> 
         )
     })?;
     let labels = s.program_labels();
-    let trace = trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices, Some(&s.idls)).await;
+    let (mut trace, landing, tip) = tokio::join!(
+        trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices, Some(&s.idls)),
+        s.beam.landing(&sig),
+        s.beam.tip_in(&tx),
+    );
+    if let Some(line) = crate::beam::describe(landing.as_ref(), tip.as_ref()) {
+        trace.narrative.push(line);
+    }
     let programs: Vec<&String> = labels.keys().filter(|p| tx.touches(p)).collect();
     Ok(Json(json!({
         "transaction": tx,
         "trace": trace,
+        "beam": { "landing": landing, "tip": tip },
         "monitored_programs": programs,
         "program_labels": labels,
         "incidents": s.store.incidents_for_transaction(&sig)?,

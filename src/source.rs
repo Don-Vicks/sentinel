@@ -12,6 +12,10 @@ pub trait VortexSource: Send + Sync {
     /// Replaces the set of programs Sentinel wants streamed.
     fn watch_programs(&self, programs: Vec<String>);
     fn health(&self) -> HubStats;
+    /// Which Solami transport is feeding the stream ("grpc" or "mirage").
+    fn transport(&self) -> &'static str {
+        "grpc"
+    }
 }
 
 const CONSUMER: &str = "sentinel";
@@ -27,5 +31,9 @@ impl VortexSource for VortexHub {
 
     fn health(&self) -> HubStats {
         self.stats()
+    }
+
+    fn transport(&self) -> &'static str {
+        VortexHub::transport(self)
     }
 }

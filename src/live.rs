@@ -123,6 +123,8 @@ pub struct StreamHealth {
     pub dropped: u64,
     pub programs_streamed: Vec<String>,
     pub uptime_secs: i64,
+    /// Which Solami transport carries the stream: "grpc" or "mirage" (failover).
+    pub transport: &'static str,
     /// Solami Blur price feed used for USD values.
     pub pricing: crate::pricing::PricingStatus,
 }

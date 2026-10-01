@@ -53,7 +53,12 @@ function StatusBar() {
         <span className={`size-2 rounded-full ${live ? 'bg-good' : 'bg-warn'} pulse-dot`} aria-hidden />
         {live ? 'Live' : sse ? 'Waiting for data' : 'Reconnecting'}
       </span>
-      <span className="hidden xl:inline whitespace-nowrap text-ink-3">Solami Yellowstone gRPC</span>
+      <span
+        className={`hidden xl:inline whitespace-nowrap ${stream?.transport === 'mirage' ? 'text-warn' : 'text-ink-3'}`}
+        title={stream?.transport === 'mirage' ? 'gRPC was unavailable, so the stream is running over Solami Mirage' : undefined}
+      >
+        {stream?.transport === 'mirage' ? 'Solami Mirage (gRPC failover)' : 'Solami Yellowstone gRPC'}
+      </span>
       <span className={item}>
         <span className="text-ink-3">ingest</span>
         <span className="num text-ink">{stream ? `${compact(stream.ingest_tps)} tx/s` : '—'}</span>

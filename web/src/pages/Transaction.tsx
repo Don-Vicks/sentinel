@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router';
 import { ArrowRight, CheckCircle2, ExternalLink, RotateCcw, XCircle } from 'lucide-react';
 import { useFetch } from '../lib/api';
-import type { CallNode, Party, TransactionDetail } from '../lib/types';
+import type { BeamLanding, CallNode, Party, TransactionDetail } from '../lib/types';
 import { clock, compact, explorer, explorerAccount, num, short, sol, usd } from '../lib/format';
 import { Address, CopyButton, Empty, ErrorState, PageHeader, PageSkeleton, Panel, Stat } from '../components/ui';
 
@@ -17,6 +17,28 @@ function PartyPill({ p, address }: { p?: Party; address: string }) {
     >
       <span className="truncate">{label}</span>
     </span>
+  );
+}
+
+function BeamDelivery({ l }: { l: BeamLanding }) {
+  const latency = l.first_seen_ms != null && l.forwarded_ms != null && l.forwarded_ms >= l.first_seen_ms ? l.forwarded_ms - l.first_seen_ms : null;
+  const rows: [string, string][] = [
+    ['Landed', l.is_landed ? 'Yes' : 'Not recorded'],
+    ['Route', l.landed_via_jito ? 'Through Jito' : 'Direct to leader'],
+    ['Region', l.region ?? '—'],
+    ['Tip', l.tip_lamports != null ? `${l.tip_lamports / 1e9} SOL` : '—'],
+    ['Forwarded after', latency != null ? `${latency} ms` : '—'],
+    ['Rebroadcast', l.rebroadcasted ? 'Yes' : 'No'],
+  ];
+  return (
+    <dl className="grid grid-cols-2 gap-x-6 gap-y-3 p-4 sm:grid-cols-3 lg:grid-cols-6">
+      {rows.map(([k, v]) => (
+        <div key={k}>
+          <dt className="text-xs text-ink-3">{k}</dt>
+          <dd className="num text-sm font-medium text-ink">{v}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -160,6 +182,12 @@ export function Transaction() {
           {trace.narrative.map((l, i) => <li key={i}>{l}</li>)}
         </ol>
       </div>
+
+      {data.beam?.landing && (
+        <Panel title="Delivery (Solami Beam)">
+          <BeamDelivery l={data.beam.landing} />
+        </Panel>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-2">
         <Panel

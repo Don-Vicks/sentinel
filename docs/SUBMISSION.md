@@ -35,9 +35,11 @@ When a Solana program starts failing on mainnet, teams find out from users, then
 
 ## How Solami is used
 
-- **Yellowstone gRPC is the only data path.** One subscription streams every monitored program, including failed transactions, through server-side `account_include` filters. Adding a program in the UI updates the filter over the open stream without reconnecting. Vortex decodes each frame: errors, compute, the call tree from logs, and SOL/SPL transfers.
+- **Yellowstone gRPC is the primary data path.** One subscription streams every monitored program, including failed transactions, through server-side `account_include` filters. Adding a program in the UI updates the filter over the open stream without reconnecting. Vortex decodes each frame: errors, compute, the call tree from logs, and SOL/SPL transfers.
+- **Mirage** is the failover: the same Yellowstone frames over a WebSocket, through the same decoder. If gRPC can't connect, Sentinel switches, says so in the status bar, and retries gRPC.
+- **Beam** (read side) shows how any transaction landed, including route, region, tip and forwarding latency, and labels Beam tips in the narrative. Public endpoints, no key. Sentinel doesn't send through Beam.
 - **Blur** (`POST /data/token/price`) prices every mint Sentinel sees move. That powers USD value flow and the "transfer worth ≥ $X" alerts, with a liquidity guard so thin meme tokens can't trigger false alerts.
-- **RPC** fetches on-chain Anchor IDLs, resolves account owners so vaults are labelled by the program that controls them, and lets you investigate any signature through the same decoder.
+- **RPC** (with Comet's fast program-account scans) fetches on-chain Anchor IDLs, finds every program an upgrade authority controls, resolves account owners so vaults are labelled by the program that controls them, and lets you investigate any signature through the same decoder.
 
 ## Tech
 

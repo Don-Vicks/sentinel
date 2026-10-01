@@ -71,9 +71,11 @@ Pump.fun, one of the busiest programs on Solana, runs well below both. Detection
 
 | Solami product | Role |
 |---|---|
-| **Yellowstone gRPC** | The only data path. One subscription carries slots plus a named transaction filter over every monitored program (`account_include`, failed transactions included). Adding a program in the UI re-sends the filter over the open stream, with no reconnect. The stream answers pings and reconnects with backoff. |
+| **Yellowstone gRPC** | The primary data path. One subscription carries slots plus a named transaction filter over every monitored program (`account_include`, failed transactions included). Adding a program in the UI re-sends the filter over the open stream, with no reconnect. The stream answers pings and reconnects with backoff. If it can't connect, Mirage takes over (below). |
 | **Blur** | `POST /data/token/price` prices every mint Sentinel sees move, in batches of up to 1000. A new mint is priced within about a second; known ones refresh every 30s. USD appears on the live feed, value-flow edges, balance changes and narratives. It also powers the USD large-transfer detector and "transfer worth ≥ $X" rules. Tokens under $10K liquidity are displayed but never trigger alerts, since one trade can move their price arbitrarily. |
-| **RPC** | Anchor IDLs are fetched from chain with `getAccountInfo`. `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. |
+| **RPC** | Anchor IDLs are fetched from chain with `getAccountInfo`. `getTransaction` for investigating any signature (rebuilt into a Yellowstone frame, decoded by Vortex). `getMultipleAccounts` resolves the owners of accounts in a trace, so a vault shows up as "Pump.fun account" rather than a raw address. The canary example sends controlled demo transactions through it. The finder's "which programs does this authority upgrade?" is a `getProgramAccounts` scan over the upgradeable loader, the call RPC + Comet accelerates; results are cached because a ProgramData account never changes owner. |
+| **Mirage** | Failover for the stream. Mirage sends the same Yellowstone `SubscribeUpdate` frames over a WebSocket, so Vortex decodes them with the same code as gRPC. After repeated gRPC connection failures Sentinel switches over, shows "Solami Mirage (gRPC failover)" in the status bar, and retries gRPC every two minutes. Mirage's filter is a saved subscription on Solami's side, so it follows the programs that subscription names, not live watchlist changes. Set `SENTINEL_TRANSPORT=mirage` to use it as the primary. |
+| **Beam** | Read side only. For any transaction, `GET /swqos/tx/{signature}` shows whether Beam carried it and how it landed: Jito or direct to a leader, region, tip, and how long Beam took to forward it. Transfers to Beam's tip accounts (`GET /onchain/tip-addresses`) are called out in the narrative. Both endpoints are public and need no key. Sentinel does not send through Beam; that needs a swQoS key and a funded wallet. |
 
 ## Run it
 
@@ -108,6 +110,9 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SOLANA_RPC_URL` | — | Solami RPC URL, used for owner labels in traces and by the canary |
 | `BLUR_API_KEY` | `YELLOWSTONE_TOKEN` | Solami key with the `DataApi` permission, for USD prices. Leave unset to fall back to the gRPC key |
 | `BLUR_API_URL` | `https://api.solami.dev` | Blur REST base URL |
+| `BEAM_API_URL` | `https://api.solami.dev` | Base URL for Beam landing and tip lookups |
+| `MIRAGE_STREAM_URL` | — | Mirage stream URL, `wss://ws.solami.dev/mirage/stream/{id}?api_key=…`. Enables gRPC failover. Use a key that can only stream |
+| `SENTINEL_TRANSPORT` | `grpc` | Set to `mirage` to use Mirage as the primary transport |
 | `SENTINEL_PROGRAMS` | — | Comma-separated program IDs to monitor at startup |
 | `SENTINEL_PORT` | `8080` | HTTP port (API + dashboard) |
 | `SENTINEL_DB` | `sentinel.db` | SQLite file |
