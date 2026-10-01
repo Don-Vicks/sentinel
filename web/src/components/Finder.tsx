@@ -51,6 +51,36 @@ export function Finder({ onDone, initial }: { onDone?: () => void; initial?: str
     }
   };
 
+  // Some programs are still being identified on the server; keep asking until they all are.
+  const pending = found?.pending ?? 0;
+  const subject = found?.subject;
+  useEffect(() => {
+    if (!pending || !subject) return;
+    let stop = false;
+    const t = setTimeout(async () => {
+      try {
+        const r = await send<Resolution>('POST', '/api/resolve', { query: subject });
+        if (stop) return;
+        const known = new Set(found?.programs.map((p) => p.program_id));
+        const mine = new Set(watching);
+        setFound(r);
+        // New arrivals are preselected like the first batch; earlier choices stay as the user left them.
+        setPicked((prev) => {
+          const next = new Set(prev);
+          r.programs.filter((p) => !known.has(p.program_id) && !p.infra && !mine.has(p.program_id)).forEach((p) => next.add(p.program_id));
+          return next;
+        });
+      } catch (e) {
+        if (!stop) setError((e as Error).message);
+      }
+    }, 2000);
+    return () => {
+      stop = true;
+      clearTimeout(t);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending, subject, found]);
+
   useEffect(() => {
     if (initial) {
       setQuery(initial);
@@ -150,7 +180,14 @@ export function Finder({ onDone, initial }: { onDone?: () => void; initial?: str
             <p className="text-sm font-medium text-ink">{found.headline}</p>
             <p className="text-xs text-ink-3">{HINTS[found.kind]}</p>
           </div>
-          <div className="max-h-72 divide-y divide-line overflow-auto">{found.programs.map(row)}</div>
+          <div className="max-h-72 divide-y divide-line overflow-auto">
+            {found.programs.map(row)}
+            {pending > 0 && (
+              <div className="flex items-center gap-2 px-3 py-2.5 text-xs text-ink-2" role="status">
+                <Spinner /> Identifying {pending} more program{pending === 1 ? '' : 's'}. Each takes a few seconds the first time.
+              </div>
+            )}
+          </div>
           <div className="flex items-center justify-between gap-3 border-t border-line px-3 py-2">
             <span className="text-xs text-ink-3">{account ? `${picked.size} selected` : 'Sign in with any wallet to get alerts'}</span>
             <button className="btn-primary" disabled={busy || (!!account && picked.size === 0)} onClick={watch}>

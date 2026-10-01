@@ -4,12 +4,9 @@
 //! public, so nothing is signed and ownership isn't checked.
 
 use anyhow::{anyhow, bail, Result};
-use futures_util::{stream, StreamExt};
 use serde::Serialize;
-use solana_account_decoder::{UiAccountEncoding, UiDataSliceConfig};
+use serde_json::{json, Value};
 use solana_client::nonblocking::rpc_client::RpcClient;
-use solana_client::rpc_config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
-use solana_client::rpc_filter::{Memcmp, RpcFilterType};
 use solana_sdk::pubkey::Pubkey;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
@@ -91,14 +88,34 @@ pub struct Resolution {
     pub subject: String,
     pub headline: String,
     pub programs: Vec<Candidate>,
+    /// Programs still being resolved in the background; ask again for the rest.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub pending: usize,
 }
 
-/// A ProgramData account never changes which program it belongs to, so this is kept for good.
-/// Lookups that finish before a timeout still count toward the next attempt.
-fn program_of() -> &'static Mutex<HashMap<Pubkey, Pubkey>> {
-    static M: OnceLock<Mutex<HashMap<Pubkey, Pubkey>>> = OnceLock::new();
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+/// A ProgramData account never changes which program it belongs to, so every answer is kept
+/// for good. Finding the owner is a scan of the whole loader (about 15 s on Solami, with no
+/// index to speed it up), so each one runs in the background and requests wait on a budget.
+enum Lookup {
+    Pending,
+    Done(Pubkey),
+    Failed(Instant),
+}
+
+fn lookups() -> &'static Mutex<HashMap<Pubkey, Lookup>> {
+    static M: OnceLock<Mutex<HashMap<Pubkey, Lookup>>> = OnceLock::new();
     M.get_or_init(Default::default)
 }
+
+/// How long one request waits for owner lookups before returning what it has.
+pub const RESPONSE_BUDGET: Duration = Duration::from_secs(5);
+const RETRY_FAILED_AFTER: Duration = Duration::from_secs(60);
+/// Pages one owner lookup may walk before giving up.
+const MAX_PAGES: usize = 80;
 
 const RESULT_TTL: Duration = Duration::from_secs(600);
 const MAX_CACHED: usize = 500;
@@ -133,77 +150,166 @@ pub fn programs_in(tx: &VortexTransaction) -> Vec<Candidate> {
     found
 }
 
+fn b58(bytes: &[u8]) -> String {
+    bs58::encode(bytes).into_string()
+}
+
 /// Memcmp filters that match ProgramData accounts whose upgrade authority is `authority`.
 /// Layout: u32 variant (3) | u64 slot | Option tag (1) | 32-byte authority.
-fn authority_filters(authority: &Pubkey) -> Vec<RpcFilterType> {
-    vec![
-        RpcFilterType::Memcmp(Memcmp::new_base58_encoded(0, &[3, 0, 0, 0])),
-        RpcFilterType::Memcmp(Memcmp::new_base58_encoded(12, &[1])),
-        RpcFilterType::Memcmp(Memcmp::new_base58_encoded(13, authority.as_ref())),
-    ]
+fn authority_filters(authority: &Pubkey) -> Value {
+    json!([
+        { "memcmp": { "offset": 0, "bytes": b58(&[3, 0, 0, 0]) } },
+        { "memcmp": { "offset": 12, "bytes": b58(&[1]) } },
+        { "memcmp": { "offset": 13, "bytes": b58(authority.as_ref()) } },
+    ])
 }
 
-fn ids_only() -> RpcProgramAccountsConfig {
-    RpcProgramAccountsConfig {
-        filters: None,
-        account_config: RpcAccountInfoConfig {
-            encoding: Some(UiAccountEncoding::Base64),
-            data_slice: Some(UiDataSliceConfig { offset: 0, length: 0 }),
-            ..Default::default()
-        },
-        with_context: None,
+/// A Program account is [variant 2 | its ProgramData address]; match on that pointer.
+fn owner_filters(program_data: &Pubkey) -> Value {
+    json!([
+        { "dataSize": 36 },
+        { "memcmp": { "offset": 4, "bytes": b58(program_data.as_ref()) } },
+    ])
+}
+
+fn http() -> &'static reqwest::Client {
+    static C: OnceLock<reqwest::Client> = OnceLock::new();
+    C.get_or_init(|| reqwest::Client::builder().timeout(Duration::from_secs(40)).build().expect("reqwest client"))
+}
+
+async fn rpc_call(url: &str, method: &str, params: Value) -> Result<Value> {
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+    let res: Value = http().post(url).json(&body).send().await?.json().await.map_err(|e| anyhow!("RPC reply wasn't JSON: {e}"))?;
+    if let Some(err) = res.get("error") {
+        bail!(
+            "RPC error {}: {}",
+            err.get("code").map(|c| c.to_string()).unwrap_or_default(),
+            err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown")
+        );
     }
+    Ok(res["result"].clone())
 }
 
-/// Programs found for an authority, and how many couldn't be resolved (rate limits, timeouts).
+/// Addresses of every account under the upgradeable loader matching `filters`, no data.
+/// Uses `getProgramAccountsV2` with pagination (Solami refuses the plain call on a program
+/// this large and returns partial pages that must be followed) and falls back to the plain
+/// call where V2 doesn't exist, as on the public RPC.
+async fn matching_accounts(url: &str, filters: &Value) -> Result<Vec<Pubkey>> {
+    let mut out = Vec::new();
+    let mut key: Option<String> = None;
+    for _ in 0..MAX_PAGES {
+        let mut cfg = json!({
+            "encoding": "base64",
+            "dataSlice": { "offset": 0, "length": 0 },
+            "filters": filters,
+            "limit": 1000,
+        });
+        if let Some(k) = &key {
+            cfg["paginationKey"] = json!(k);
+        }
+        match rpc_call(url, "getProgramAccountsV2", json!([UPGRADEABLE_LOADER, cfg.clone()])).await {
+            Ok(result) => {
+                let page = result.get("value").unwrap_or(&result);
+                for a in page["accounts"].as_array().into_iter().flatten() {
+                    if let Some(k) = a["pubkey"].as_str().and_then(|k| Pubkey::from_str(k).ok()) {
+                        out.push(k);
+                    }
+                }
+                match page["paginationKey"].as_str() {
+                    Some(k) if !k.is_empty() => key = Some(k.to_string()),
+                    _ => return Ok(out),
+                }
+            }
+            Err(e) if key.is_none() && e.to_string().contains("-32601") => {
+                // No V2 on this endpoint: the plain call returns everything at once.
+                cfg.as_object_mut().unwrap().remove("limit");
+                let result = rpc_call(url, "getProgramAccounts", json!([UPGRADEABLE_LOADER, cfg])).await?;
+                let list = result.as_array().or_else(|| result["value"].as_array());
+                return Ok(list
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a["pubkey"].as_str().and_then(|k| Pubkey::from_str(k).ok()))
+                    .collect());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    bail!("The lookup didn't finish within {MAX_PAGES} pages")
+}
+
+/// Starts (once) the background search for the program that owns `program_data`.
+fn start_owner_lookup(url: &str, program_data: Pubkey) {
+    {
+        let mut map = lookups().lock().unwrap();
+        match map.get(&program_data) {
+            Some(Lookup::Done(_) | Lookup::Pending) => return,
+            Some(Lookup::Failed(at)) if at.elapsed() < RETRY_FAILED_AFTER => return,
+            _ => {}
+        }
+        map.insert(program_data, Lookup::Pending);
+    }
+    let url = url.to_string();
+    tokio::spawn(async move {
+        let mut outcome = Lookup::Failed(Instant::now());
+        for attempt in 0..3u64 {
+            match matching_accounts(&url, &owner_filters(&program_data)).await {
+                Ok(found) => {
+                    if let Some(p) = found.first() {
+                        outcome = Lookup::Done(*p);
+                    }
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "owner lookup failed");
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+                }
+            }
+        }
+        lookups().lock().unwrap().insert(program_data, outcome);
+    });
+}
+
+/// Programs found for an authority. `pending` are still being resolved in the background;
+/// `missing` failed and will be retried on a later request.
 pub struct Owned {
     pub programs: Vec<Candidate>,
+    pub pending: usize,
     pub missing: usize,
 }
 
-/// Every program whose upgrade authority is `authority`.
-pub async fn programs_by_authority(rpc: &RpcClient, authority: &Pubkey) -> Result<Owned> {
-    let loader = Pubkey::from_str(UPGRADEABLE_LOADER)?;
-    let mut cfg = ids_only();
-    cfg.filters = Some(authority_filters(authority));
-    let data_accounts = rpc
-        .get_program_accounts_with_config(&loader, cfg)
+/// Every program whose upgrade authority is `authority`. Waits up to `budget` for the
+/// per-program lookups, then returns what has resolved.
+pub async fn programs_by_authority(rpc_url: &str, authority: &Pubkey, budget: Duration) -> Result<Owned> {
+    let mut data_accounts = matching_accounts(rpc_url, &authority_filters(authority))
         .await
         .map_err(|e| anyhow!("Couldn't look up programs for that address: {e}"))?;
+    data_accounts.truncate(MAX_FOUND);
+    for d in &data_accounts {
+        start_owner_lookup(rpc_url, *d);
+    }
 
-    // A Program account is [variant 2 | its ProgramData address]; find each by that pointer.
-    // A few at a time with retries: public endpoints rate-limit bursts.
-    let data_addrs: Vec<Pubkey> = data_accounts.into_iter().take(MAX_FOUND).map(|(k, _)| k).collect();
-    let results: Vec<Option<Pubkey>> = stream::iter(data_addrs.into_iter().map(|data_addr| {
-        async move {
-            if let Some(p) = program_of().lock().unwrap().get(&data_addr) {
-                return Some(*p);
-            }
-            for attempt in 0..3u64 {
-                let mut cfg = ids_only();
-                cfg.filters = Some(vec![
-                    RpcFilterType::DataSize(36),
-                    RpcFilterType::Memcmp(Memcmp::new_base58_encoded(4, data_addr.as_ref())),
-                ]);
-                if let Ok(v) = rpc.get_program_accounts_with_config(&loader, cfg).await {
-                    let program = v.into_iter().next().map(|(program, _)| program);
-                    if let Some(p) = program {
-                        program_of().lock().unwrap().insert(data_addr, p);
-                    }
-                    return program;
+    let deadline = Instant::now() + budget;
+    loop {
+        let (programs, pending, missing) = {
+            let map = lookups().lock().unwrap();
+            let mut programs = Vec::new();
+            let (mut pending, mut missing) = (0, 0);
+            for d in &data_accounts {
+                match map.get(d) {
+                    Some(Lookup::Done(p)) => programs.push(candidate(&p.to_string())),
+                    Some(Lookup::Failed(_)) => missing += 1,
+                    _ => pending += 1,
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt + 1))).await;
             }
-            None
+            (programs, pending, missing)
+        };
+        if pending == 0 || Instant::now() >= deadline {
+            let mut programs = programs;
+            programs.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(a.program_id.cmp(&b.program_id)));
+            return Ok(Owned { programs, pending, missing });
         }
-    }))
-    .buffer_unordered(4)
-    .collect()
-    .await;
-    let missing = results.iter().filter(|r| r.is_none()).count();
-    let mut programs: Vec<Candidate> = results.into_iter().flatten().map(|p| candidate(&p.to_string())).collect();
-    programs.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(a.program_id.cmp(&b.program_id)));
-    Ok(Owned { programs, missing })
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 pub async fn resolve_address(rpc: &RpcClient, address: &str) -> Result<Resolution> {
@@ -214,7 +320,7 @@ pub async fn resolve_address(rpc: &RpcClient, address: &str) -> Result<Resolutio
     }
     let r = lookup_address(rpc, address).await?;
     // Incomplete answers aren't kept, so searching again finishes the job.
-    if !r.headline.contains("couldn't be loaded") {
+    if r.pending == 0 && !r.headline.contains("couldn't be loaded") {
         let mut cache = results().lock().unwrap();
         if cache.len() >= MAX_CACHED {
             cache.retain(|_, (at, _)| at.elapsed() < RESULT_TTL);
@@ -237,17 +343,20 @@ async fn lookup_address(rpc: &RpcClient, address: &str) -> Result<Resolution> {
                 subject: address.into(),
                 headline: format!("{} is a program", c.name.as_deref().unwrap_or("This address")),
                 programs: vec![c],
+                pending: 0,
             });
         }
     }
-    let owned = programs_by_authority(rpc, &key).await?;
-    if !owned.programs.is_empty() {
-        let n = owned.programs.len();
-        let mut headline = format!("{n} program{} upgradeable by this address", if n == 1 { "" } else { "s" });
-        if owned.missing > 0 {
+    let owned = programs_by_authority(&rpc.url(), &key, RESPONSE_BUDGET).await?;
+    let total = owned.programs.len() + owned.pending + owned.missing;
+    if total > 0 {
+        let mut headline = format!("{total} program{} upgradeable by this address", if total == 1 { "" } else { "s" });
+        if owned.pending > 0 {
+            headline.push_str(&format!(" ({} of {total} resolved so far)", owned.programs.len()));
+        } else if owned.missing > 0 {
             headline.push_str(&format!(" ({} more couldn't be loaded; search again to retry)", owned.missing));
         }
-        return Ok(Resolution { kind: "authority", subject: address.into(), headline, programs: owned.programs });
+        return Ok(Resolution { kind: "authority", subject: address.into(), headline, programs: owned.programs, pending: owned.pending });
     }
     if account.is_none() {
         bail!("Nothing found at that address on mainnet");
@@ -257,6 +366,7 @@ async fn lookup_address(rpc: &RpcClient, address: &str) -> Result<Resolution> {
         subject: address.into(),
         headline: "No programs found for this address. It can still be watched as an account.".into(),
         programs: vec![candidate(address)],
+        pending: 0,
     })
 }
 
@@ -273,6 +383,7 @@ pub fn resolve_transaction(signature: &str, tx: &VortexTransaction) -> Resolutio
             if apps == 0 { "" } else { "; pick the ones you want to watch" }
         ),
         programs,
+        pending: 0,
     }
 }
 
@@ -307,7 +418,12 @@ mod tests {
 
     #[test]
     fn authority_filter_layout() {
-        let f = authority_filters(&Pubkey::new_unique());
+        let key = Pubkey::new_unique();
+        let f = authority_filters(&key);
+        let f = f.as_array().unwrap();
         assert_eq!(f.len(), 3);
+        assert_eq!(f[2]["memcmp"]["offset"], 13);
+        assert_eq!(f[2]["memcmp"]["bytes"], key.to_string());
+        assert_eq!(owner_filters(&key)[0]["dataSize"], 36);
     }
 }

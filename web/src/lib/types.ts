@@ -359,4 +359,6 @@ export interface Resolution {
   subject: string;
   headline: string;
   programs: Candidate[];
+  /** Programs still being resolved in the background; the finder asks again. */
+  pending?: number;
 }
