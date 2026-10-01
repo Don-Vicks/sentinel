@@ -125,6 +125,8 @@ pub struct StreamHealth {
     pub uptime_secs: i64,
     /// Which Solami transport carries the stream: "grpc" or "mirage" (failover).
     pub transport: &'static str,
+    /// The chain tip stopped advancing: Sentinel isn't receiving data, so detectors are paused.
+    pub stalled: bool,
     /// Solami Blur price feed used for USD values.
     pub pricing: crate::pricing::PricingStatus,
 }

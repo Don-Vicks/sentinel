@@ -213,6 +213,66 @@ fn with_error(base: Arc<VortexTransaction>, name: &str, code: u32) -> Arc<Vortex
     Arc::new(t)
 }
 
+/// The failure happens inside another program that this transaction also calls.
+fn failing_in_other_program(base: Arc<VortexTransaction>, name: &str, code: u32) -> Arc<VortexTransaction> {
+    const OTHER: &str = "OtherProgram1111111111111111111111111111111";
+    let mut t = (*with_error(base, name, code)).clone();
+    if let Some(e) = t.error.as_mut() {
+        e.program_id = Some(OTHER.into());
+    }
+    t.invocations.push(Invocation {
+        program_id: OTHER.into(),
+        depth: 2,
+        instruction: Some("Swap".into()),
+        success: Some(false),
+        failure: Some("custom program error".into()),
+        ..Default::default()
+    });
+    Arc::new(t)
+}
+
+#[tokio::test]
+async fn another_programs_new_error_does_not_open_an_incident() {
+    let dir = std::env::temp_dir().join(format!("sentinel-foreign-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(16);
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
+    s.add_program(PROGRAM.into(), None).unwrap();
+
+    let t0 = 1_700_000_000i64;
+    let mut n = 0;
+    for sec in t0..t0 + 300 {
+        for _ in 0..5 {
+            n += 1;
+            let t = tx(n, sec, n % 10 != 0);
+            s.on_transaction(if t.success { t } else { with_error(t, "TooLittleSolReceived", 6003) });
+        }
+        s.on_tick(sec + 1);
+    }
+    // Same shape as the new-error test, but half the failures now come from another program.
+    for sec in t0 + 300..t0 + 360 {
+        for _ in 0..5 {
+            n += 1;
+            let t = tx(n, sec, n % 10 != 0);
+            let t = match (t.success, n % 20 == 0) {
+                (true, _) => t,
+                (false, true) => failing_in_other_program(t, "AccountNotInitialized", 3012),
+                (false, false) => with_error(t, "TooLittleSolReceived", 6003),
+            };
+            s.on_transaction(t);
+        }
+        s.on_tick(sec + 1);
+    }
+    let incidents = store.incidents(Some(PROGRAM), 10).unwrap();
+    assert!(
+        incidents.iter().all(|i| i.kind != IncidentKind::ErrorSpike),
+        "errors raised by another program aren't this program's incident: {:?}",
+        incidents.iter().map(|i| i.title.clone()).collect::<Vec<_>>()
+    );
+    let _ = std::fs::remove_file(&dir);
+}
+
 #[tokio::test]
 async fn new_error_type_opens_incident_while_failure_rate_is_flat() {
     let dir = std::env::temp_dir().join(format!("sentinel-errspike-{}.db", std::process::id()));

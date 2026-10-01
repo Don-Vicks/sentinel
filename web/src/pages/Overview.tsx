@@ -184,7 +184,7 @@ export function Overview() {
       ) : programs.length === 0 ? (
         <div className="panel">
           <Empty title="No programs monitored" icon={<Radar className="size-6" aria-hidden />}>
-            Paste a program, an upgrade-authority address or a transaction above. Sentinel starts streaming immediately and learns a baseline over the first two minutes.
+            Paste a program, an upgrade-authority address or a transaction above. Sentinel starts streaming immediately and learns a baseline over the first five minutes.
           </Empty>
         </div>
       ) : (

@@ -46,6 +46,9 @@ pub struct DetectionConfig {
     pub error_multiplier: f64,
     /// Occurrences within the window for a never-seen error to count.
     pub error_new_min_count: u32,
+    /// An error must also be at least this percentage of the program's transactions in the
+    /// window, so a few stray errors on a busy program aren't an incident.
+    pub error_min_share_pct: f64,
 
     pub compute_enabled: bool,
     pub compute_window_secs: u32,
@@ -69,7 +72,7 @@ pub struct TransferThreshold {
 impl Default for DetectionConfig {
     fn default() -> Self {
         Self {
-            warmup_secs: 120,
+            warmup_secs: 300,
             baseline_secs: 600,
             resolve_after_secs: 90,
             failure_enabled: true,
@@ -88,6 +91,7 @@ impl Default for DetectionConfig {
             error_min_count: 10,
             error_multiplier: 3.0,
             error_new_min_count: 5,
+            error_min_share_pct: 1.0,
             compute_enabled: true,
             compute_window_secs: 60,
             compute_multiplier: 2.0,

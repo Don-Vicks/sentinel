@@ -239,6 +239,48 @@ impl Window {
         out
     }
 
+    /// Occurrences of each error fingerprint per `chunk`-second slice over
+    /// `[now - from_ago, now - to_ago)`, skipping slices that contain a second flagged with
+    /// `mask`. Returns the number of slices kept and, per fingerprint, one count per slice
+    /// (zeros included), so the spread between slices can be measured.
+    pub fn fingerprint_chunks(
+        &self,
+        now: i64,
+        from_ago: i64,
+        to_ago: i64,
+        chunk: i64,
+        mask: u8,
+    ) -> (usize, HashMap<String, Vec<f64>>) {
+        let start = now - from_ago;
+        let n = ((from_ago - to_ago) / chunk).max(0) as usize;
+        let slot = |second: i64| {
+            let i = (second - start) / chunk;
+            (second >= start && (i as usize) < n).then_some(i as usize)
+        };
+        let mut masked = vec![false; n];
+        for b in self.buckets.iter().filter(|b| b.anomalous & mask != 0) {
+            if let Some(i) = slot(b.second) {
+                masked[i] = true;
+            }
+        }
+        let mut position = vec![usize::MAX; n];
+        let mut kept = 0;
+        for i in 0..n {
+            if !masked[i] {
+                position[i] = kept;
+                kept += 1;
+            }
+        }
+        let mut out: HashMap<String, Vec<f64>> = HashMap::new();
+        for b in &self.buckets {
+            let Some(i) = slot(b.second).filter(|&i| !masked[i]) else { continue };
+            for (k, v) in &b.fingerprints {
+                out.entry(k.clone()).or_insert_with(|| vec![0.0; kept])[position[i]] += *v as f64;
+            }
+        }
+        (kept, out)
+    }
+
     /// Completed seconds only (excludes `now`).
     pub fn series(&self, now: i64, secs: i64) -> Vec<SeriesPoint> {
         self.buckets

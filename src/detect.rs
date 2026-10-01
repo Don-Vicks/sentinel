@@ -272,6 +272,9 @@ pub struct ErrorSpike {
 /// Flags error types that surge against their own baseline, or that appear
 /// for the first time after warmup. `describe` renders a fingerprint key for
 /// humans; `first_seen` is the unix second each fingerprint was first observed.
+/// Past windows needed before an error's own variation replaces the Poisson estimate.
+const MIN_SWING_WINDOWS: usize = 4;
+
 pub fn error_spikes(
     w: &Window,
     cfg: &DetectionConfig,
@@ -288,23 +291,36 @@ pub fn error_spikes(
     let base = w.stats_masked(now, base_span, win, ANOMALY_FAILURE);
     let base_windows = (base.seconds as f64 / win as f64).max(1.0);
     let armed_at = w.first_second.unwrap_or(now) + cfg.warmup_secs as i64;
+    // How much each error's count really swings from one window to the next. Mainnet errors
+    // are burstier than Poisson noise (a router's mix shifts with the market), so the spread
+    // measured over past windows replaces the Poisson estimate when there are enough of them.
+    let whole = ((base_span - win) / win).max(0);
+    let (kept, per_window) = w.fingerprint_chunks(now, win + whole * win, win, win, ANOMALY_FAILURE);
 
     let mut out = Vec::new();
     for (key, &count) in &cur.fingerprints {
         let count = count as f64;
         let expected = base.fingerprints.get(key).copied().unwrap_or(0) as f64 / base_windows;
         let new = expected == 0.0 && first_seen.get(key).is_some_and(|&f| f >= armed_at);
+        let swing = match per_window.get(key) {
+            Some(v) if kept >= MIN_SWING_WINDOWS => mean_std(v).1,
+            _ => 0.0,
+        }
+        .max(expected.sqrt());
         let threshold = if new {
             cfg.error_new_min_count as f64
         } else {
             (expected * cfg.error_multiplier)
-                .max(expected + 4.0 * expected.sqrt() + 3.0)
+                .max(expected + 4.0 * swing + 3.0)
                 .max(cfg.error_min_count as f64)
         };
         if count < threshold {
             continue;
         }
         let share = if cur.tx > 0 { count / cur.tx as f64 } else { 0.0 };
+        if share * 100.0 < cfg.error_min_share_pct {
+            continue;
+        }
         let severity = match share {
             s if s >= 0.2 => Severity::High,
             s if s >= 0.05 || new => Severity::Medium,
@@ -317,10 +333,11 @@ pub fn error_spikes(
                 format!(
                     "{what} appeared {count:.0} times in the last {win}s ({:.1}% of transactions). It was \
                      never seen during the previous {} of monitoring. Threshold for a new error is {} \
-                     occurrences in {win}s.",
+                     occurrences in {win}s and at least {}% of transactions.",
                     share * 100.0,
                     mins(now - w.first_second.unwrap_or(now) - win),
                     cfg.error_new_min_count,
+                    cfg.error_min_share_pct,
                 ),
             )
         } else {
@@ -329,11 +346,12 @@ pub fn error_spikes(
                 format!(
                     "{what} occurred {count:.0} times in the last {win}s ({:.1}% of transactions). Over \
                      the previous {} (excluding earlier incidents) it averaged {expected:.2} per {win}s. \
-                     Threshold is max({}× expected, expected + 4√expected + 3, {}) = {threshold:.1}.",
+                     Threshold is max({}× expected, expected + 4× its usual swing + 3, {}) = {threshold:.1}, and at least {}% of transactions.",
                     share * 100.0,
                     mins(base_span - win),
                     cfg.error_multiplier,
                     cfg.error_min_count,
+                    cfg.error_min_share_pct,
                 ),
             )
         };
@@ -390,5 +408,69 @@ mod error_spike_tests {
         assert_eq!(a.detection.severity, Severity::High);
         let b = spikes.iter().find(|s| s.key == "b").expect("b is new");
         assert!(b.new);
+    }
+    /// 10 tx/s for `secs`; error "a" occurs `per_minute(minute)` times that minute, spread evenly.
+    fn record_minutes(w: &mut Window, from_min: i64, to_min: i64, per_minute: impl Fn(i64) -> u32) {
+        for m in from_min..to_min {
+            let n = per_minute(m);
+            for s in 0..60 {
+                let second = m * 60 + s;
+                // Spread the minute's errors evenly over its seconds (at most 10 a second).
+                let errors = ((s as u32 + 1) * n / 60) - (s as u32 * n / 60);
+                for i in 0..10u32 {
+                    let fp = (i < errors).then(|| "a".to_string());
+                    w.record(second, fp.is_none(), None, 0, None, fp);
+                }
+            }
+        }
+    }
+
+    fn spikes_at(w: &Window, minute: i64) -> Vec<ErrorSpike> {
+        let mut first = HashMap::new();
+        first.insert("a".to_string(), 0);
+        error_spikes(w, &DetectionConfig::default(), minute * 60, &first, &|k| k.to_string())
+    }
+
+    #[test]
+    fn bursty_errors_need_a_bigger_jump_than_steady_ones() {
+        // Bursty: alternates 10 and 90 per minute (mean 50, swing 40).
+        let mut bursty = Window::default();
+        record_minutes(&mut bursty, 0, 10, |m| if m % 2 == 0 { 10 } else { 90 });
+        record_minutes(&mut bursty, 10, 11, |_| 190);
+        assert!(spikes_at(&bursty, 11).is_empty(), "190 is within this error's usual swings");
+        let mut bursty_big = Window::default();
+        record_minutes(&mut bursty_big, 0, 10, |m| if m % 2 == 0 { 10 } else { 90 });
+        record_minutes(&mut bursty_big, 10, 11, |_| 350);
+        assert_eq!(spikes_at(&bursty_big, 11).len(), 1, "but 350 is far outside them");
+
+        // Steady at 50 per minute: the same 190 is a clear spike.
+        let mut steady = Window::default();
+        record_minutes(&mut steady, 0, 10, |_| 50);
+        record_minutes(&mut steady, 10, 11, |_| 190);
+        assert_eq!(spikes_at(&steady, 11).len(), 1);
+    }
+
+    #[test]
+    fn a_trickle_on_a_busy_program_is_not_an_incident() {
+        // 100 tx/s; the error jumps from 0 to 30 in a minute, which is 0.5% of 6,000 transactions.
+        let mut w = Window::default();
+        for s in 0..720 {
+            for i in 0..100 {
+                let fp = (s >= 660 && i == 0 && s % 2 == 0).then(|| "rare".to_string());
+                w.record(s, fp.is_none(), None, 0, None, fp);
+            }
+        }
+        let mut first = HashMap::new();
+        first.insert("rare".to_string(), 660);
+        assert!(error_spikes(&w, &DetectionConfig::default(), 720, &first, &|k| k.to_string()).is_empty());
+        // The same error at 5% of traffic is reported.
+        let mut w = Window::default();
+        for s in 0..720 {
+            for i in 0..100 {
+                let fp = (s >= 660 && i < 5).then(|| "rare".to_string());
+                w.record(s, fp.is_none(), None, 0, None, fp);
+            }
+        }
+        assert_eq!(error_spikes(&w, &DetectionConfig::default(), 720, &first, &|k| k.to_string()).len(), 1);
     }
 }

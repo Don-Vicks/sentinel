@@ -154,6 +154,8 @@ export interface StreamHealth {
   uptime_secs: number;
   /** Which Solami transport carries the stream; mirage means gRPC failed over. */
   transport?: 'grpc' | 'mirage';
+  /** The chain tip stopped advancing: no data is arriving, so detectors are paused. */
+  stalled?: boolean;
   pricing: {
     enabled: boolean;
     priced_mints: number;

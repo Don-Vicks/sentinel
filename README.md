@@ -35,13 +35,14 @@ flowchart TD
 - **Failure fingerprints.** Every failed transaction is attributed to the deepest failing frame in its call tree, as *program::instruction → error* (Anchor error names come from logs). For example: "83% of failures are `TooLittleSolReceived` in `Pump.fun::Sell`".
 - **Explainable detection.** No ML. Each detector compares a short window against a trailing baseline and states the rule it applied with real numbers:
   - failure-rate spike
-  - error-type spike: one error surging against its own baseline, or a never-seen error appearing, even when the overall failure rate looks normal
+  - error-type spike: one error the monitored program itself raised surging against its own baseline, or a never-seen one appearing, even when the overall failure rate looks normal. The threshold uses how much that error actually swings from minute to minute, and it must account for at least 1% of traffic. Errors from other programs in the same transactions (a router's downstream pools, a bot's own program) count toward the failure rate but don't open incidents of their own
   - activity spike (mean + zσ)
   - activity stopped
   - compute spike
   - large transfer, by amount per asset or by USD value (Blur-priced, liquid tokens only)
 
   Seconds inside an open incident are left out of later baselines, so one incident doesn't mask the next.
+- **It doesn't blame programs for its own blindness.** Slots arrive several times a second, so a chain tip that stops advancing means the feed is down, not that every program went quiet. Sentinel pauses all detectors, keeps those seconds out of every baseline, shows "Feed stalled" in the status bar, and holds off for 90 seconds after recovery. Vortex also reconnects any gRPC stream that goes 30 seconds without a message. A program that goes quiet while the chain keeps moving still raises "Activity stopped".
 - **Per-instruction health.** Volume, failure rate and compute per instruction (Buy, Sell, …) over the last 5 minutes.
 - **Incident timelines.** The metric around each incident, with baseline, threshold, onset, detection and resolution markers, plus each error type's count over time. The timeline is saved with the incident when it resolves.
 - **Anchor IDL decoding.** Sentinel fetches each program's IDL from chain (current and legacy formats). It names instruction accounts (`bonding_curve`, `user`, …), decodes arguments (`amount`, `max_sol_cost`), and translates bare custom error codes into names and messages.
@@ -87,6 +88,18 @@ Measured with `cargo run --release --example bench` on real mainnet Pump.fun tra
 
 Pump.fun, one of the busiest programs on Solana, runs well below both. Detection runs on a 1-second tick. Each incident records its own detection latency, measured from the triggering transaction reaching Sentinel.
 
+**Live on Solami gRPC (Oct 1, 2026),** Pump.fun and Jupiter v6 together, about 17 minutes:
+
+| | |
+|---|---|
+| Transactions ingested | 232,000, with none dropped |
+| Sustained rate | roughly 90 to 380 tx/s combined, 0 slots of lag behind the stream |
+| Newest transaction when sampled | 7 to 20 ms old |
+| Detection latency recorded on incidents | 25 to 680 ms |
+| Stream behaviour | Solami closed the stream about every 1 to 2.5 minutes; Vortex reconnected each time within about a second |
+
+Both programs fail 55 to 80% of the time in steady state, mostly arbitrage bots losing races, so a failure-rate alert has to judge them against their own baseline, not a fixed number. Tuning on this traffic is what produced the error-spike rules above: the first untuned run opened 23 incidents in ten minutes, the tuned one 7 in seventeen.
+
 ## How Solami is used
 
 | Solami product | Role |
@@ -119,7 +132,7 @@ cd web && npm install && npm run build && cd ..
 cargo run --release
 ```
 
-Open http://localhost:8080. Pump.fun is monitored out of the box; add any program ID from the Overview page. Detectors arm after a two-minute baseline.
+Open http://localhost:8080. Pump.fun is monitored out of the box; add any program ID from the Overview page. Detectors arm after a five-minute baseline, so they judge a program against its own real behaviour.
 
 ### Environment
 

@@ -41,7 +41,8 @@ function StatusBar() {
   const { stream, programs } = usePrograms();
   const sse = useLiveStatus();
   const now = useClock();
-  const live = !!stream?.connected && sse;
+  const stalled = !!stream?.stalled;
+  const live = !!stream?.connected && sse && !stalled;
   const openIncidents = programs.reduce((n, p) => n + p.open_incidents, 0);
   const age = stream?.last_transaction_age_ms;
   const blur = stream?.pricing;
@@ -51,7 +52,7 @@ function StatusBar() {
     <div className="sticky top-0 z-20 flex h-11 items-center gap-4 overflow-hidden border-b border-line bg-canvas/90 px-4 text-xs backdrop-blur lg:px-8">
       <span className={`inline-flex items-center gap-2 whitespace-nowrap font-medium ${live ? 'text-good' : 'text-warn'}`}>
         <span className={`size-2 rounded-full ${live ? 'bg-good' : 'bg-warn'} pulse-dot`} aria-hidden />
-        {live ? 'Live' : sse ? 'Waiting for data' : 'Reconnecting'}
+        {live ? 'Live' : stalled ? 'Feed stalled · detectors paused' : sse ? 'Waiting for data' : 'Reconnecting'}
       </span>
       <span
         className={`hidden xl:inline whitespace-nowrap ${stream?.transport === 'mirage' ? 'text-warn' : 'text-ink-3'}`}

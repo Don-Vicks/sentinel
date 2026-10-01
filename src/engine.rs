@@ -62,7 +62,19 @@ struct State {
     dropped: u64,
     newest_tx_slot: u64,
     ingest: Window,
+    /// The chain tip as last seen on the feed, and when it last moved. A tip that stops
+    /// moving means the feed is dead, not that every program went quiet.
+    feed_slot: u64,
+    feed_moved_at: i64,
+    /// Detectors stay paused until this time after a stall, while the gap washes out of the windows.
+    hold_until: i64,
+    stalled: bool,
 }
+
+/// Seconds without the chain tip advancing before the feed counts as stalled.
+const STALL_SECS: i64 = 15;
+/// Seconds detectors stay paused after the feed comes back.
+const RESUME_GRACE_SECS: i64 = 90;
 
 struct ProgramState {
     program: MonitoredProgram,
@@ -393,8 +405,31 @@ impl Sentinel {
         state.ingest.advance(now);
         let rules = state.rules.clone();
 
+        // Is the feed itself alive? Slots arrive several times a second, so a frozen tip means
+        // we are blind. Quiet programs then say nothing about the programs, and the empty
+        // seconds must not become part of anyone's baseline.
+        let tip = self.source.health().last_slot;
+        if tip != state.feed_slot || state.feed_moved_at == 0 {
+            state.feed_slot = tip;
+            state.feed_moved_at = now;
+        }
+        let stalled = tip > 0 && now - state.feed_moved_at > STALL_SECS;
+        if stalled {
+            state.hold_until = now + RESUME_GRACE_SECS;
+        }
+        if stalled != state.stalled {
+            tracing::warn!(stalled, "feed {}", if stalled { "stalled; detectors paused" } else { "recovered" });
+        }
+        state.stalled = stalled;
+        let paused = now < state.hold_until;
+
         for ps in state.programs.values_mut() {
             ps.window.advance(now);
+            if paused {
+                use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
+                ps.window.flag(now, 2, ANOMALY_FAILURE | ANOMALY_ACTIVITY | ANOMALY_COMPUTE);
+                continue;
+            }
 
             if !ps.pending_feed.is_empty() {
                 let mut items = std::mem::take(&mut ps.pending_feed);
@@ -455,7 +490,12 @@ impl Sentinel {
                 .map(|o| o.fingerprint_counts.keys().cloned().collect())
                 .unwrap_or_default();
             let mut firing: HashSet<String> = HashSet::new();
-            for spike in spikes {
+            // Errors raised by other programs inside transactions that merely touch this one
+            // (a router's downstream pools, a bot's own program) churn with the market. They
+            // count toward the overall failure rate and show in breakdowns, but only errors
+            // the monitored program itself raised open an incident.
+            let own = format!("{}:", ps.program.program_id);
+            for spike in spikes.into_iter().filter(|s| s.key.starts_with(&own)) {
                 let key = format!("{ERROR_SPIKE_PREFIX}{}", spike.key);
                 let already = ps.open.contains_key(&key);
                 let open_count = ps.open.keys().filter(|k| k.starts_with(ERROR_SPIKE_PREFIX)).count();
@@ -963,6 +1003,7 @@ impl Sentinel {
             programs_streamed: hub.programs,
             uptime_secs: (Utc::now() - hub.started_at).num_seconds(),
             transport: self.source.transport(),
+            stalled: state.stalled,
             pricing: self.prices.status(),
         }
     }
