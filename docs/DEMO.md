@@ -18,7 +18,7 @@ The rule is "runs live on mainnet, and clearly shows the product works", so ever
 | Time | Screen | Say |
 |---|---|---|
 | 0:00 | Overview, Pump.fun card live | "Your Solana program starts failing on mainnet. Explorers show you one transaction at a time. Sentinel tells you which error, in which instruction, since when, and who it hits, within a second, then pages you." |
-| 0:15 | Top status bar | "All of it comes live off Solami's Yellowstone gRPC stream, decoded by Vortex, my Rust transaction stack. That's the ingest rate, the slot, and lag behind the chain tip. USD prices come from Solami Blur." |
+| 0:15 | Top status bar | "All of it comes live off Solami's Yellowstone gRPC stream, decoded by Vortex, my own Rust transaction stack. I extended it for this project. That's the ingest rate, the slot, and lag behind the chain tip. USD prices come from Solami Blur." |
 | 0:25 | Program page: stats, TPS chart | "Pump.fun, live. Success versus failure every second, compute, unique signers, each compared with its own baseline." |
 | 0:40 | Instructions table, "Why transactions fail" | "Per instruction: Buy versus Sell failure rates. And the reason failures happen, grouped by where they fail and why. The names come from Pump.fun's own on-chain IDL." |
 | 0:55 | Live transactions feed | "This is streaming in real time. Failed transactions show their decoded error." |

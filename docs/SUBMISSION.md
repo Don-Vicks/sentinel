@@ -33,6 +33,10 @@ When a Solana program starts failing on mainnet, teams find out from users, then
   - account state changes
 - **Alert rules and webhooks,** with a delivery log showing status and latency.
 
+## Built on my own Vortex library
+
+Sentinel uses [Vortex](https://github.com/Don-Vicks/vortex) for ingest. Vortex is my own project (same author, same GitHub account), started in June as a transaction execution stack. The decoder, the fan-out hub, the RPC frame rebuild and the Mirage transport were written for this submission: 1,842 lines (tests and examples included) in public commits from Sep 28 to Oct 1. Everything that makes Sentinel a product, about 6,500 lines of Rust plus a React dashboard, is in this repo. The README's "Built on Vortex" section has the commit links.
+
 ## How Solami is used
 
 - **Yellowstone gRPC is the primary data path.** One subscription streams every monitored program, including failed transactions, through server-side `account_include` filters. Adding a program in the UI updates the filter over the open stream without reconnecting. Vortex decodes each frame: errors, compute, the call tree from logs, and SOL/SPL transfers.
