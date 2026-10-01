@@ -8,7 +8,7 @@ import { useAuth } from '../lib/auth';
 import type { Incident, MonitoredProgram, ProgramSnapshot, SeriesPoint, Severity, TxSummary } from '../lib/types';
 import { compact, duration, KIND_LABEL, num, pct } from '../lib/format';
 import { ActivityChart, LineChart, ShareBar, Sparkline } from '../components/charts';
-import { Address, Empty, ErrorState, HealthDot, PageHeader, PageSkeleton, Panel, SeverityBadge, Stat } from '../components/ui';
+import { Address, Empty, ErrorState, HealthDot, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, ShowMore, Stat } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
 
@@ -98,6 +98,10 @@ export function Program() {
   const { data, setData, error, loading, reload } = useFetch<Detail>(`/api/programs/${id}`);
   const [paused, setPaused] = useState(false);
   const [failedOnly, setFailedOnly] = useState(false);
+  const [ixShown, setIxShown] = useState(6);
+  const [errShown, setErrShown] = useState(6);
+  const [errScope, setErrScope] = useState<'own' | 'all'>('own');
+  const [txShown, setTxShown] = useState(25);
   const [fresh, setFresh] = useState<Set<string>>(new Set());
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -130,6 +134,7 @@ export function Program() {
   if (!data) return null;
 
   const s = data.snapshot;
+  const errRows = errScope === 'own' ? s.top_errors.filter((e) => e.own) : s.top_errors;
   const failTone =
     s.failure_rate_60s >= Math.max(s.baseline_failure_rate * 2.5, s.baseline_failure_rate + 5) && s.tx_60s >= 20
       ? 'crit'
@@ -182,13 +187,13 @@ export function Program() {
           </span>
         }
         meta={
-          <span className="flex flex-wrap items-center gap-x-2 text-ink-3">
+          <span className="flex flex-col gap-y-1 text-ink-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-2">
             <Address value={id} n={8} />
-            <span aria-hidden>·</span>
+            <span aria-hidden className="hidden sm:inline">·</span>
             <span className="text-xs num">{num(s.total_tx)} transactions observed</span>
             {s.health === 'warming_up' && (
               <>
-                <span aria-hidden>·</span>
+                <span aria-hidden className="hidden sm:inline">·</span>
                 <span className="text-xs text-accent">
                   learning the normal baseline, detectors arm in {duration(s.warmup_remaining_secs * 1000)}
                 </span>
@@ -276,7 +281,7 @@ export function Program() {
           <Empty title="No instructions yet" />
         ) : (
           <div className="overflow-x-auto">
-            <table className="table">
+            <table className="table table-stack">
               <thead>
                 <tr>
                   <th>Instruction</th>
@@ -287,33 +292,62 @@ export function Program() {
                 </tr>
               </thead>
               <tbody>
-                {s.instructions.map((ix) => (
+                {s.instructions.slice(0, ixShown).map((ix) => (
                   <tr key={ix.name}>
-                    <td className="font-medium">{ix.name}</td>
-                    <td>
+                    <td data-primary className="font-medium">
+                      {ix.name === '(unnamed)' ? (
+                        <span title="Transactions that touch this program but whose logs name no instruction, usually bots whose own program fails first">
+                          No instruction named
+                        </span>
+                      ) : (
+                        ix.name
+                      )}
+                    </td>
+                    <td data-label="Share of transactions" data-wide>
                       <div className="flex items-center gap-2">
                         <ShareBar share={ix.share} tone="accent" />
                         <span className="num text-xs w-10 text-right">{(ix.share * 100).toFixed(0)}%</span>
                       </div>
                     </td>
-                    <td className="num text-right">{num(ix.tx)}</td>
-                    <td className={`num text-right ${ix.failure_rate >= Math.max(10, s.baseline_failure_rate * 2) && ix.tx >= 10 ? 'text-crit font-medium' : ''}`}>
+                    <td data-label="Transactions" className="num text-right">{num(ix.tx)}</td>
+                    <td data-label="Failure rate" className={`num text-right ${ix.failure_rate >= Math.max(10, s.baseline_failure_rate * 2) && ix.tx >= 10 ? 'text-crit font-medium' : ''}`}>
                       {pct(ix.failure_rate)}
                     </td>
-                    <td className="num text-right">{compact(ix.avg_cu)}</td>
+                    <td data-label="Avg compute" className="num text-right">{compact(ix.avg_cu)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
         )}
+        <ShowMore shown={ixShown} total={s.instructions.length} step={20} onMore={() => setIxShown((n) => n + 20)} />
       </Panel>
 
-      <Panel title="Why transactions fail (last 60s)">
+      <Panel
+        title="Why transactions fail (last 60s)"
+        action={
+          s.top_errors.length > 0 && (
+            <Segmented
+              label="Which errors to show"
+              value={errScope}
+              onChange={setErrScope}
+              options={[
+                { value: 'own', label: `${data.program.label} (${s.top_errors.filter((e) => e.own).length})` },
+                { value: 'all', label: `All (${s.top_errors.length})` },
+              ]}
+            />
+          )
+        }
+      >
         {s.top_errors.length === 0 ? (
           <Empty title="No failures in the last minute" />
+        ) : errRows.length === 0 ? (
+          <Empty title={`No errors raised by ${data.program.label} itself`}>
+            {s.top_errors.length} come from other programs in the same transactions. They count toward the failure rate but don't open
+            incidents. Switch to "All" to see them.
+          </Empty>
         ) : (
-          <table className="table">
+          <table className="table table-stack">
             <thead>
               <tr>
                 <th>Error</th>
@@ -323,28 +357,29 @@ export function Program() {
               </tr>
             </thead>
             <tbody>
-              {s.top_errors.map((e) => (
-                <tr key={e.key}>
-                  <td className="font-medium">
+              {errRows.slice(0, errShown).map((e) => (
+                <tr key={e.key} className={e.own === false ? 'opacity-60' : ''} title={e.own === false ? 'Raised by another program in the same transactions; counts toward the failure rate but opens no incident' : undefined}>
+                  <td data-primary className="font-medium">
                     {e.error}
                     {e.code !== null && <span className="ml-1.5 num text-xs text-ink-3">#{e.code}</span>}
                   </td>
-                  <td className="text-ink-2">
+                  <td data-label="Raised by" data-wide className="text-ink-2">
                     {e.program_name}
                     {e.instruction && <span className="text-ink-3">::{e.instruction}</span>}
                   </td>
-                  <td>
+                  <td data-label="Share of failures" data-wide>
                     <div className="flex items-center gap-2">
                       <ShareBar share={e.share} />
                       <span className="num text-xs w-10 text-right">{(e.share * 100).toFixed(0)}%</span>
                     </div>
                   </td>
-                  <td className="num text-right">{num(e.count)}</td>
+                  <td data-label="Count" className="num text-right">{num(e.count)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
+        <ShowMore shown={errShown} total={errRows.length} step={20} onMore={() => setErrShown((n) => n + 20)} />
       </Panel>
 
       <Panel
@@ -367,8 +402,9 @@ export function Program() {
             Transactions appear here the moment Vortex receives them from the stream.
           </Empty>
         ) : (
-          <TxTable rows={rows.slice(0, 100)} fresh={fresh} />
+          <TxTable rows={rows.slice(0, txShown)} fresh={fresh} />
         )}
+        <ShowMore shown={txShown} total={Math.min(rows.length, 100)} step={25} onMore={() => setTxShown((n) => n + 25)} />
       </Panel>
 
       {data.incidents.some((i) => i.status === 'resolved') && (

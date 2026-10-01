@@ -41,6 +41,8 @@ export interface SeriesPoint {
 
 export interface ErrorCount {
   key: string;
+  /** Raised by the monitored program itself rather than another program in the same transactions. */
+  own?: boolean;
   program_id: string;
   program_name: string;
   instruction: string | null;
@@ -365,4 +367,13 @@ export interface Resolution {
   programs: Candidate[];
   /** Programs still being resolved in the background; the finder asks again. */
   pending?: number;
+}
+
+/** What each Solami product is doing for this instance. */
+export interface SolamiStatus {
+  grpc: { connected: boolean; transport: 'grpc' | 'mirage'; tx_per_sec: number; transactions: number; behind_chain_slots: number | null };
+  rpc: { enabled: boolean; idls_loaded: number };
+  blur: { enabled: boolean; priced_mints: number; error: string | null };
+  mirage: { configured: boolean; active: boolean };
+  beam: { lookups: number; carried: number };
 }

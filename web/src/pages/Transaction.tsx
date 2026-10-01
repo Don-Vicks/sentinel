@@ -1,7 +1,7 @@
 import { Link, useParams } from 'react-router';
 import { ArrowRight, CheckCircle2, ExternalLink, RotateCcw, XCircle } from 'lucide-react';
 import { useFetch } from '../lib/api';
-import type { BeamLanding, CallNode, Party, TransactionDetail } from '../lib/types';
+import type { BeamLanding, CallNode, Party, TransactionDetail, Trace } from '../lib/types';
 import { clock, compact, explorer, explorerAccount, num, short, sol, usd } from '../lib/format';
 import { Address, CopyButton, Empty, ErrorState, PageHeader, PageSkeleton, Panel, Stat } from '../components/ui';
 
@@ -79,6 +79,35 @@ function CallTree({ nodes, total }: { nodes: CallNode[]; total: number }) {
   );
 }
 
+function StateTable({ rows, labelOf }: { rows: Trace['state_changes']; labelOf: (a: string) => string }) {
+  return (
+    <div className="overflow-x-auto">
+      <table className="table table-stack">
+        <thead>
+          <tr><th>Account</th><th>Kind</th><th className="text-right">Before</th><th className="text-right">After</th><th className="text-right">Change</th><th>Note</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((c) => (
+            <tr key={c.account}>
+              <td data-primary>
+                <a className="link font-mono text-xs" href={explorerAccount(c.account)} target="_blank" rel="noreferrer">{short(c.account, 5)}</a>
+                {c.owner && <span className="text-xs text-ink-3"> · {labelOf(c.owner)}</span>}
+              </td>
+              <td data-label="Kind" className="text-xs text-ink-2">{c.kind === 'data' ? 'data' : c.symbol}</td>
+              <td data-label="Before" className="num text-xs text-right">{c.kind === 'data' ? '' : compact(c.before)}</td>
+              <td data-label="After" className="num text-xs text-right">{c.kind === 'data' ? '' : compact(c.after)}</td>
+              <td data-label="Change" className={`num text-xs text-right ${c.delta < 0 ? 'text-crit' : c.delta > 0 ? 'text-good' : ''}`}>
+                {c.kind === 'data' ? '' : `${c.delta > 0 ? '+' : ''}${compact(c.delta)}`}
+              </td>
+              <td data-label="Note" data-wide className="text-xs text-ink-3">{c.note}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export function Transaction() {
   const { sig = '' } = useParams();
   const { data, error, loading, reload } = useFetch<TransactionDetail>(`/api/transactions/${sig}`);
@@ -101,6 +130,9 @@ export function Transaction() {
   const parties = new Map(trace.parties.map((p) => [p.address, p]));
   const decodedByPath = new Map(trace.decoded.map((d) => [d.path, d]));
   const labelOf = (a: string) => parties.get(a)?.label ?? short(a);
+  const moved = (c: Trace['state_changes'][number]) => c.kind !== 'data' && c.delta !== 0;
+  const changedStates = trace.state_changes.filter(moved);
+  const quietStates = trace.state_changes.filter((c) => !moved(c));
   const topTotal = trace.call_tree.filter((n) => n.depth === 1).reduce((s, n) => s + (n.compute_consumed ?? 0), 0);
   const priorityFee =
     tx.compute_unit_price && tx.compute_unit_limit ? (tx.compute_unit_price * tx.compute_unit_limit) / 1e6 : null;
@@ -209,7 +241,7 @@ export function Transaction() {
                     </span>
                     {usd(f.usd) && <span className="num text-ink-2">{usd(f.usd)}</span>}
                     <ArrowRight className="size-4 text-ink-3" aria-hidden />
-                    <span className="text-ink-3 num">ix {f.instruction}</span>
+                    <span className="text-ink-3 num">instruction {f.instruction}</span>
                   </span>
                   <span className="flex justify-end min-w-0"><PartyPill p={parties.get(f.to)} address={f.to} /></span>
                 </li>
@@ -222,19 +254,19 @@ export function Transaction() {
           {trace.balance_changes.length === 0 ? (
             <Empty title="No balance changes" />
           ) : (
-            <table className="table">
+            <table className="table table-stack">
               <thead>
                 <tr><th>Owner</th><th>Asset</th><th className="text-right">Change</th><th className="text-right">USD</th></tr>
               </thead>
               <tbody>
                 {trace.balance_changes.map((b, i) => (
                   <tr key={i}>
-                    <td className="truncate max-w-56" title={b.owner}>{labelOf(b.owner)}</td>
-                    <td className="text-ink-2">{b.symbol}</td>
-                    <td className={`num text-right ${b.delta < 0 ? 'text-crit' : 'text-good'}`}>
+                    <td data-primary className="truncate max-w-56" title={b.owner}>{labelOf(b.owner)}</td>
+                    <td data-label="Asset" className="text-ink-2">{b.symbol}</td>
+                    <td data-label="Change" className={`num text-right ${b.delta < 0 ? 'text-crit' : 'text-good'}`}>
                       {b.delta > 0 ? '+' : ''}{compact(b.delta)}
                     </td>
-                    <td className="num text-right text-ink-2">{usd(b.usd) ?? '—'}</td>
+                    <td data-label="USD" className="num text-right text-ink-2">{usd(b.usd) ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
@@ -248,30 +280,25 @@ export function Transaction() {
       </Panel>
 
       <Panel title="Account state changes">
-        <div className="overflow-x-auto">
-          <table className="table">
-            <thead>
-              <tr><th>Account</th><th>Kind</th><th className="text-right">Before</th><th className="text-right">After</th><th className="text-right">Change</th><th>Note</th></tr>
-            </thead>
-            <tbody>
-              {trace.state_changes.map((c) => (
-                <tr key={c.account}>
-                  <td>
-                    <a className="link font-mono text-xs" href={explorerAccount(c.account)} target="_blank" rel="noreferrer">{short(c.account, 5)}</a>
-                    {c.owner && <span className="text-xs text-ink-3"> · {labelOf(c.owner)}</span>}
-                  </td>
-                  <td className="text-xs text-ink-2">{c.kind === 'data' ? 'data' : c.symbol}</td>
-                  <td className="num text-xs text-right">{c.kind === 'data' ? '' : compact(c.before)}</td>
-                  <td className="num text-xs text-right">{c.kind === 'data' ? '' : compact(c.after)}</td>
-                  <td className={`num text-xs text-right ${c.delta < 0 ? 'text-crit' : c.delta > 0 ? 'text-good' : ''}`}>
-                    {c.kind === 'data' ? '' : `${c.delta > 0 ? '+' : ''}${compact(c.delta)}`}
-                  </td>
-                  <td className="text-xs text-ink-3">{c.note}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+        {changedStates.length > 0 ? (
+          <StateTable rows={changedStates} labelOf={labelOf} />
+        ) : (
+          <Empty title={trace.reverted ? 'Nothing changed: the transaction was rolled back' : 'No balances changed'}>
+            Only the fee payer's fee was charged.
+          </Empty>
+        )}
+        {quietStates.length > 0 && (
+          <details className="group border-t border-line">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-2.5 text-xs text-ink-2 hover:bg-sunken">
+              <span>
+                {quietStates.length} other account{quietStates.length === 1 ? '' : 's'} touched, with unchanged balances or writable data
+              </span>
+              <span className="text-ink-3 group-open:hidden">Show</span>
+              <span className="hidden text-ink-3 group-open:inline">Hide</span>
+            </summary>
+            <StateTable rows={quietStates} labelOf={labelOf} />
+          </details>
+        )}
       </Panel>
 
       <Panel title={trace.decoded.length ? 'Instructions (decoded with on-chain IDLs)' : 'Instructions'}>
@@ -289,7 +316,7 @@ export function Transaction() {
                   <span className="text-ink-2 truncate">{dec?.name ?? ix.name ?? ''}</span>
                   <span className="ml-auto text-xs text-ink-3">{ix.accounts.length} accounts</span>
                 </summary>
-                <div className="px-4 pb-3 pl-16 space-y-2 text-xs">
+                <div className="px-4 pb-3 sm:pl-16 space-y-2 text-xs">
                   <div><span className="text-ink-3">Program </span><Address value={ix.program_id} n={8} /></div>
                   {dec ? (
                     <>

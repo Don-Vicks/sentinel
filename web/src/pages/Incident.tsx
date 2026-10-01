@@ -7,7 +7,7 @@ import { useAuth } from '../lib/auth';
 import type { Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
 import { clock, compact, duration, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { ShareBar } from '../components/charts';
-import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, Spinner, Stat, StatusBadge } from '../components/ui';
+import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, ShowMore, Spinner, Stat, StatusBadge } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
 import { IncidentTimeline } from '../components/IncidentTimeline';
@@ -29,6 +29,7 @@ export function Incident() {
     program_label: string | null;
     transactions: TxSummary[];
   }>(`/api/incidents/${id}`);
+  const [txShown, setTxShown] = useState(25);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const { account, requestSignIn } = useAuth();
@@ -132,7 +133,7 @@ export function Incident() {
 
       {fps.length > 0 && (
         <Panel title="Failure fingerprints">
-          <table className="table">
+          <table className="table table-stack">
             <thead>
               <tr>
                 <th>Error</th>
@@ -145,22 +146,22 @@ export function Incident() {
             <tbody>
               {fps.map((f) => (
                 <tr key={f.key}>
-                  <td className="font-medium">
+                  <td data-primary className="font-medium">
                     {f.error}
                     {f.code !== null && <span className="ml-1.5 num text-xs text-ink-3">#{f.code}</span>}
                   </td>
-                  <td className="text-ink-2">
+                  <td data-label="Raised by" data-wide className="text-ink-2">
                     {f.program_name}
                     {f.instruction && <span className="text-ink-3">::{f.instruction}</span>}
                   </td>
-                  <td>
+                  <td data-label="Share" data-wide>
                     <div className="flex items-center gap-2">
                       <ShareBar share={f.share} />
                       <span className="num text-xs w-10 text-right">{(f.share * 100).toFixed(0)}%</span>
                     </div>
                   </td>
-                  <td className="num text-right">{num(f.count)}</td>
-                  <td className="space-x-2 whitespace-nowrap">
+                  <td data-label="Count" className="num text-right">{num(f.count)}</td>
+                  <td data-label="Examples" data-wide className="space-x-2 sm:whitespace-nowrap">
                     {f.samples.slice(0, 3).map((s) => (
                       <Link key={s} to={`/tx/${s}`} className="link font-mono text-xs">
                         {short(s, 4)}
@@ -176,10 +177,11 @@ export function Incident() {
 
       <Panel title={`Affected transactions (${num(data.transactions.length)}${inc.affected_count > data.transactions.length ? ` of ${num(inc.affected_count)}` : ''})`}>
         {data.transactions.length ? (
-          <TxTable rows={data.transactions} />
+          <TxTable rows={data.transactions.slice(0, txShown)} />
         ) : (
           <Empty title="No transactions linked yet" />
         )}
+        <ShowMore shown={txShown} total={data.transactions.length} step={50} onMore={() => setTxShown((n) => n + 50)} />
       </Panel>
     </div>
   );

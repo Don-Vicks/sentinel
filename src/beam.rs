@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use vortex::events::{TransferKind, VortexTransaction};
@@ -54,6 +55,9 @@ pub struct BeamClient {
     base: String,
     tips: Mutex<Option<(Instant, HashSet<String>)>>,
     landings: Mutex<HashMap<String, (Instant, Option<Landing>)>>,
+    /// Lookups answered by Solami (not the cache), and how many were Beam transactions.
+    asked: AtomicU64,
+    carried: AtomicU64,
 }
 
 impl BeamClient {
@@ -70,6 +74,8 @@ impl BeamClient {
             base: base.trim_end_matches('/').to_string(),
             tips: Mutex::new(None),
             landings: Mutex::new(HashMap::new()),
+            asked: AtomicU64::new(0),
+            carried: AtomicU64::new(0),
         }
     }
 
@@ -108,12 +114,16 @@ impl BeamClient {
             }
         }
         let res = self.http.get(format!("{}/swqos/tx/{signature}", self.base)).send().await.ok()?;
+        self.asked.fetch_add(1, Ordering::Relaxed);
         // A 404 means "not a Beam transaction"; anything else unexpected isn't cached.
         let result = if res.status().as_u16() == 404 {
             None
         } else {
             Some(res.error_for_status().ok()?.json::<Landing>().await.ok()?)
         };
+        if result.is_some() {
+            self.carried.fetch_add(1, Ordering::Relaxed);
+        }
         let mut cache = self.landings.lock().unwrap();
         if cache.len() >= MAX_CACHED {
             cache.retain(|_, (at, _)| at.elapsed() < FOUND_TTL);
@@ -122,6 +132,11 @@ impl BeamClient {
             cache.insert(signature.to_string(), (Instant::now(), result.clone()));
         }
         result
+    }
+
+    /// (lookups made, of which were sent through Beam)
+    pub fn counts(&self) -> (u64, u64) {
+        (self.asked.load(Ordering::Relaxed), self.carried.load(Ordering::Relaxed))
     }
 
     /// The tip this transaction paid to Beam, if any.

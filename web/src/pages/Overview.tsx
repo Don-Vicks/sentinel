@@ -10,6 +10,7 @@ import { compact, num, pct, short } from '../lib/format';
 import { Empty, ErrorState, HealthDot, PageHeader, Panel, Skeleton, Stat } from '../components/ui';
 import { Sparkline } from '../components/charts';
 import { Finder } from '../components/Finder';
+import { SolamiPanel } from '../components/SolamiPanel';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 
 const STEPS = [
@@ -176,6 +177,8 @@ export function Overview() {
           <Stat label="Transactions observed" value={compact(observed)} sub="since Sentinel started" />
         </div>
       )}
+
+      <SolamiPanel />
 
       {error ? (
         <ErrorState message={`Couldn't reach Sentinel: ${error}`} onRetry={reload} />

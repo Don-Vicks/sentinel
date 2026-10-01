@@ -92,8 +92,49 @@ export function Stat({
         <span className={`num text-[22px] leading-7 font-semibold tracking-tight truncate ${toneCls}`}>{value}</span>
         {badge && <span className={`rounded px-1.5 py-px num text-[11px] font-medium whitespace-nowrap ${badgeCls}`}>{badge.text}</span>}
       </div>
-      {sub && <div className="text-xs text-ink-3 mt-0.5 truncate" title={typeof sub === 'string' ? sub : undefined}>{sub}</div>}
+      {sub && <div className="text-xs text-ink-3 mt-0.5 break-words line-clamp-2" title={typeof sub === 'string' ? sub : undefined}>{sub}</div>}
       {spark && <div className="mt-2 -mx-1">{spark}</div>}
+    </div>
+  );
+}
+
+/** Two-way switch used in panel headers. */
+export function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  label: string;
+}) {
+  return (
+    <div className="inline-flex rounded-md border border-line-strong p-0.5 text-xs" role="group" aria-label={label}>
+      {options.map((o) => (
+        <button
+          key={o.value}
+          className={`h-7 rounded px-2.5 ${value === o.value ? 'bg-sunken font-medium text-ink' : 'text-ink-2'}`}
+          aria-pressed={value === o.value}
+          onClick={() => onChange(o.value)}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Reveals a long list a page at a time: "Show 25 more (75 left)". */
+export function ShowMore({ shown, total, step, onMore }: { shown: number; total: number; step: number; onMore: () => void }) {
+  if (total <= shown) return null;
+  const left = total - shown;
+  return (
+    <div className="border-t border-line p-3 text-center">
+      <button className="btn h-8 text-xs" onClick={onMore}>
+        Show {Math.min(step, left)} more ({left} left)
+      </button>
     </div>
   );
 }

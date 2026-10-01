@@ -48,6 +48,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/auth/logout", post(auth_logout))
         .route("/api/auth/me", get(auth_me))
         .route("/api/status", get(status))
+        .route("/api/solami", get(solami))
         .route("/api/resolve", post(resolve))
         .route("/api/programs", get(list_programs).post(add_program))
         .route(
@@ -120,10 +121,16 @@ async fn status(State(s): State<AppState>, Viewer(account): Viewer) -> ApiResult
         "watching": account.as_deref().map(|a| s.watching(a)).unwrap_or_default(),
         "stream": s.stream_health(),
         "pricing": s.prices.status(),
+        "solami": s.solami_status(),
         "programs": s.programs(),
         "series": s.programs_series(300),
         "now": Utc::now(),
     })))
+}
+
+/// What each Solami product is doing for this instance.
+async fn solami(State(s): State<AppState>) -> ApiResult<Value> {
+    Ok(Json(json!(s.solami_status())))
 }
 
 async fn list_programs(State(s): State<AppState>) -> ApiResult<Value> {

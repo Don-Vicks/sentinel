@@ -310,6 +310,11 @@ pub struct IdlRegistry {
 }
 
 impl IdlRegistry {
+    /// Programs whose Anchor IDL was found on chain and decoded.
+    pub fn loaded(&self) -> usize {
+        self.cache.read().unwrap().values().filter(|i| i.is_some()).count()
+    }
+
     pub fn new(rpc: Option<Arc<RpcClient>>) -> Arc<Self> {
         Arc::new(Self {
             rpc,

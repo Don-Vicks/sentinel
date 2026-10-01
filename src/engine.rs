@@ -904,7 +904,11 @@ impl Sentinel {
                 summary: message.clone(),
                 explanation: format!("Alert rule \"{}\" matched: {message}.", rule.name),
                 source: format!("rule:{}", rule.id),
-                metric: None,
+                metric: match &rule.condition {
+                    Condition::Metric { metric, .. } => serde_json::to_value(metric).ok().and_then(|v| v.as_str().map(String::from)),
+                    Condition::TransferUsd { .. } => Some("transfer_usd".to_string()),
+                    _ => None,
+                },
                 observed: Some(observed),
                 peak: Some(observed),
                 baseline: None,
@@ -1026,6 +1030,30 @@ impl Sentinel {
                 (fresh && tip.abs_diff(hub.last_slot) < 10_000).then(|| tip.saturating_sub(hub.last_slot))
             },
             pricing: self.prices.status(),
+        }
+    }
+
+    /// One summary of every Solami product in use, for the dashboard.
+    pub fn solami_status(&self) -> crate::live::SolamiStatus {
+        use crate::live::*;
+        let stream = self.stream_health();
+        let pricing = self.prices.status();
+        let (lookups, carried) = self.beam.counts();
+        SolamiStatus {
+            grpc: GrpcStatus {
+                connected: stream.connected && !stream.stalled,
+                transport: stream.transport,
+                tx_per_sec: stream.ingest_tps,
+                transactions: stream.transactions_received,
+                behind_chain_slots: stream.behind_chain_slots,
+            },
+            rpc: RpcStatus { enabled: self.rpc.is_some(), idls_loaded: self.idls.loaded() },
+            blur: BlurStatus { enabled: pricing.enabled, priced_mints: pricing.priced_mints, error: pricing.last_error },
+            mirage: MirageStatus {
+                configured: std::env::var("MIRAGE_STREAM_URL").is_ok_and(|u| !u.is_empty()),
+                active: stream.transport == "mirage",
+            },
+            beam: BeamStatus { lookups, carried },
         }
     }
 
@@ -1397,13 +1425,22 @@ fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {
 
     let mut errors: Vec<_> = s60.fingerprints.iter().collect();
     errors.sort_by(|a, b| b.1.cmp(a.1));
+    // Other programs' errors (bots, a router's pools) are usually louder than the program's
+    // own, so keep room for both: otherwise the program's real errors fall off the list.
+    let (mut own_n, mut other_n) = (0, 0);
     let top_errors = errors
         .into_iter()
-        .take(5)
         .filter_map(|(key, count)| {
             let fp = ps.fingerprints.get(key)?;
+            let own = fp.program_id == ps.program.program_id;
+            let seen = if own { &mut own_n } else { &mut other_n };
+            if *seen >= if own { 8 } else { 6 } {
+                return None;
+            }
+            *seen += 1;
             Some(ErrorCount {
                 key: key.clone(),
+                own,
                 program_name: program_label(&fp.program_id, &labels),
                 program_id: fp.program_id.clone(),
                 instruction: fp.instruction.clone(),
@@ -1594,15 +1631,21 @@ fn timeline(ps: &ProgramState, inc: &Incident, now: i64) -> Option<Timeline> {
     let w = &ps.window;
     let first = w.first_second?;
     let anchor = inc.onset_at.unwrap_or(inc.detected_at).timestamp();
-    let floor = (now - crate::metrics::HISTORY_SECS + 1).max(first);
+    let history_floor = now - crate::metrics::HISTORY_SECS + 1;
+    // Older than the history we keep: nothing live to show (a saved timeline may exist).
+    if anchor < history_floor {
+        return None;
+    }
+    // Right after a program starts the incident can begin before the first recorded second;
+    // the chart then simply starts where the data does.
+    let floor = history_floor.max(first);
     let start = (anchor - TIMELINE_LEAD).max(floor);
     let end = inc
         .resolved_at
         .map(|r| r.timestamp() + TIMELINE_TAIL)
         .unwrap_or(now)
         .min(now);
-    // The window no longer covers the incident's start: nothing live to show.
-    if anchor < floor || end <= start {
+    if end <= start {
         return None;
     }
     let labels = program_labels_one(&ps.program);
@@ -1640,7 +1683,7 @@ fn timeline(ps: &ProgramState, inc: &Incident, now: i64) -> Option<Timeline> {
         bucket_secs: TIMELINE_BUCKET,
         start,
         end,
-        onset: inc.onset_at.map(|t| t.timestamp()),
+        onset: inc.onset_at.map(|t| t.timestamp()).filter(|&t| t >= start),
         detected: inc.detected_at.timestamp(),
         resolved: inc.resolved_at.map(|t| t.timestamp()),
         fingerprints,

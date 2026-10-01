@@ -62,6 +62,9 @@ pub enum IncidentChange {
 #[derive(Debug, Clone, Serialize)]
 pub struct ErrorCount {
     pub key: String,
+    /// Raised by the monitored program itself, as opposed to another program in the same
+    /// transactions. Only these can open error-spike incidents.
+    pub own: bool,
     pub program_id: String,
     pub program_name: String,
     pub instruction: Option<String>,
@@ -131,4 +134,49 @@ pub struct StreamHealth {
     pub behind_chain_slots: Option<u64>,
     /// Solami Blur price feed used for USD values.
     pub pricing: crate::pricing::PricingStatus,
+}
+
+/// What each Solami product is doing for this instance right now.
+#[derive(Debug, Clone, Serialize)]
+pub struct SolamiStatus {
+    pub grpc: GrpcStatus,
+    pub rpc: RpcStatus,
+    pub blur: BlurStatus,
+    pub mirage: MirageStatus,
+    pub beam: BeamStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct GrpcStatus {
+    pub connected: bool,
+    pub transport: &'static str,
+    pub tx_per_sec: f64,
+    pub transactions: u64,
+    pub behind_chain_slots: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RpcStatus {
+    pub enabled: bool,
+    pub idls_loaded: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BlurStatus {
+    pub enabled: bool,
+    pub priced_mints: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MirageStatus {
+    /// A Mirage stream URL is configured, so gRPC failures fail over to it.
+    pub configured: bool,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BeamStatus {
+    pub lookups: u64,
+    pub carried: u64,
 }

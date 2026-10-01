@@ -1,38 +1,105 @@
-# Demo script (2:45, live on mainnet)
+# Demo script (about 2:50, live on mainnet)
 
-The rule is "runs live on mainnet, and clearly shows the product works", so every shot uses the real stream: no simulator and no pre-recorded data.
+Everything on screen comes from the real Solami stream: no simulator, no pre-recorded data. The alert you trigger on camera fires from live traffic, so nothing needs to be staged.
 
-## Before recording
+## The three programs to watch
 
-- [ ] `.env` has the Solami key. `docker compose up --build` (or `cargo run --release`) is running.
-- [ ] Start **at least 15 minutes early**, so Pump.fun has a real baseline and a transaction history.
-- [ ] The top status bar shows **Live**, ingest tx/s > 0, and Blur prices with no error.
-- [ ] Signed in with your wallet (sidebar, bottom), and Pump.fun is starred (**Watch** on its page). Rules only fire for programs you watch.
-- [ ] A Discord channel is open in a second window. Its webhook is in an alert rule: **"An incident opens with severity at least: medium"**, scope all programs. Press **Test** once to confirm it arrives.
-- [ ] Canary fallback: fund `canary-keypair.json` with ~0.01 SOL. Monitor its address in Sentinel and add a rule: **Failed transactions exceed 3 over 60s**, with the Discord webhook.
-- [ ] Find a real Pump.fun trade with a USD value flow and note its signature. Also find one failed transaction with an IDL error message.
-- [ ] Browser at 1440×900, dark mode, other tabs closed, notifications off.
+Use **Jupiter v6, Orca Whirlpool and Meteora DLMM**. Measured on a 370 ms-latency home connection, they total about 410 tx/s and the stream stays **0.0 s behind the chain**. Do **not** watch Pump.fun or PumpSwap for the recording: their traffic arrives in bursts and the stream fell 25 to 30 s behind the chain on the same connection. That is honest to show, but it will make the status bar amber in your demo.
+
+| Program | tx/s | Behind the chain |
+|---|---|---|
+| Jupiter v6 | ~60 | 0.0 s |
+| Orca Whirlpool | ~85 | 0.0 s |
+| Meteora DLMM | ~230 | 0.0 s |
+| Pump.fun | ~265 | ~25 s |
+
+## Before recording (do this 20 minutes ahead)
+
+**1. Start Sentinel on the three programs**
+
+```bash
+cd ~/Developer/rust-projects/vortex-sentinel
+set -a; . ./.env; set +a
+export SENTINEL_PROGRAMS=JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4,whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc,LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
+cargo run --release --bin sentinel
+```
+
+Open http://localhost:8080. Detectors need five minutes of history to arm, and a longer history makes the charts and timelines look much better, so start early.
+
+**2. Check the screen is healthy.** All of these must be true before you press record:
+
+- [ ] Top bar says **Live**, **behind** is 1.0 s or less, and **blur** shows a number of priced tokens (not "error").
+- [ ] On the Overview, the **Powered by Solami** panel shows green dots for gRPC, RPC + Comet, Blur and Beam. (Mirage shows "Not set" unless you configured it. That is fine; see the notes below.)
+- [ ] No amber "behind" figure. If it is amber, wait a minute. If it stays amber, restart Sentinel.
+
+**3. Get a webhook destination.** The nicest on camera is a Discord channel in a second window: Server Settings, then Integrations, then Webhooks, then New Webhook, then Copy URL. Sentinel formats Discord messages natively. Fallback: a free URL from webhook.site.
+
+**4. Sign in once and rehearse the alert** in a throwaway Discord channel, so you know it works. Then **delete the rule** from the Alerts page so you create it fresh on camera. Any Solana wallet works (Phantom, Backpack, Solflare). Signing in costs nothing and sends no transaction.
+
+**5. Pre-warm the finder.** Paste Pump.fun's upgrade authority into the box once, so the lookup is instant on camera (the first lookup takes about 7 seconds):
+
+```
+7gZufwwAo17y5kg8FMyJy2phgpvv9RSdzWtdXiWHjFr8
+```
+
+**6. Pick your two transactions.** This prints a failed transaction and a USD-priced swap from live traffic:
+
+```bash
+python3 scripts/demo_picks.py
+```
+
+Keep both links in a notes file.
+
+**7. Screen.** 1440×900 or similar, one theme (light or dark) the whole way through, other tabs closed, notifications off. **Never show `.env`, the terminal environment or any API key.**
 
 ## Shot list
 
-| Time | Screen | Say |
-|---|---|---|
-| 0:00 | Overview, Pump.fun card live | "Your Solana program starts failing on mainnet. Explorers show you one transaction at a time. Sentinel tells you which error, in which instruction, since when, and who it hits, within a second, then pages you." |
-| 0:15 | Top status bar | "All of it comes live off Solami's Yellowstone gRPC stream, decoded by Vortex, my own Rust transaction stack. I extended it for this project. That's the ingest rate, the slot, and lag behind the chain tip. USD prices come from Solami Blur." |
-| 0:25 | Program page: stats, TPS chart | "Pump.fun, live. Success versus failure every second, compute, unique signers, each compared with its own baseline." |
-| 0:40 | Instructions table, "Why transactions fail" | "Per instruction: Buy versus Sell failure rates. And the reason failures happen, grouped by where they fail and why. The names come from Pump.fun's own on-chain IDL." |
-| 0:55 | Live transactions feed | "This is streaming in real time. Failed transactions show their decoded error." |
-| 1:05 | **Trigger**: run the canary in a terminal (`cargo run --example canary -- --count 8 --fail`), or wait for a natural spike if one is open | "Let's break something on purpose: real failing transactions, landing on mainnet right now." |
-| 1:20 | Discord pings; Incidents page updates live | "Sentinel caught it, opened an incident, and paged me on Discord." |
-| 1:30 | Incident page: "Why this fired", stats, timeline | "Every alert explains itself: the observed rate, the normal baseline, and the exact threshold rule. No black-box ML. The timeline shows onset, detection, and the error types driving it." |
-| 1:50 | Affected transactions → open one | "Every incident links to the actual transactions behind it." |
-| 2:00 | Transaction page: narrative, value flow (USD), call tree | "Sentinel explains the transaction in plain language: who called what, where value moved and what it was worth, through Blur prices, and which program in the call tree failed, with its compute cost." |
-| 2:20 | Instructions expanded: decoded args, named accounts, IDL error message | "Arguments and account names are decoded from the program's IDL: max SOL cost, bonding curve, user. The error comes with the program's own message." |
-| 2:30 | README: diagram and numbers | "Open source: Solami gRPC, RPC and Blur, feeding a Rust decoder at thirteen thousand transactions per second. One `docker compose up` to run it on your own program." |
-| 2:45 | End on the Overview | "Vortex Sentinel. Incidents, not transactions." |
+Times are targets. The total should land between 2:40 and 3:00.
+
+| Time | On screen | What to do | What to say |
+|---|---|---|---|
+| 0:00 | Overview, programs live, Solami panel visible | Let the numbers tick for a second | "A Solana program fails in ways an explorer won't show you. Sentinel watches every transaction live, tells you when something breaks, shows you what and why, and alerts you. This is real mainnet traffic, right now." |
+| 0:15 | **Powered by Solami** panel and the top status bar | Point at each tile, then the bar | "Everything here runs on Solami. Yellowstone gRPC streams about four hundred transactions a second, and 'behind' is measured against the real chain tip over RPC: zero seconds. RPC with Comet loads each program's on-chain IDL and does the program scans. Blur prices tokens in dollars. Beam tells us how a transaction landed. Vortex, my own Rust library, decodes the stream." |
+| 0:40 | Finder (signed out, Overview hero) | Paste the authority address, press **Find programs** | "I don't make you type program IDs. Paste an upgrade authority. It's public, nothing is signed, and the list of every program it can upgrade comes back from a Comet-accelerated scan." |
+| 0:55 | Click **Sign in with wallet** | Choose the wallet and sign | "Sign in with Solana: a free message, no transaction. It gives me my own watchlist and alerts." |
+| 1:05 | Jupiter v6 program page | Click **Watch**, then scroll the charts and the instructions table | "Jupiter, live: success against failure each second, compute, and each instruction's failure rate. Failures that Jupiter itself raised are separated from other programs' errors inside the same transactions, so noise doesn't look like an incident." |
+| 1:30 | **Alerts** page | Click the **Failure rate above 50%** quick start, paste the Discord webhook, click **Create rule** | "Now an alert. One click fills a rule: page me when the failure rate passes fifty percent. I point it at Discord and create it." |
+| 1:45 | Deliveries table, then the Discord window | Wait a few seconds for the row to appear | "It fired on live traffic. The delivery log shows HTTP 200 and the latency, and here it is in Discord." Show the message. |
+| 2:00 | Click the **#incident** link in the delivery row | Scroll: Why this fired, stats, timeline, fingerprints | "Every alert explains itself: the observed value, the threshold, the exact rule, and a timeline. Below it, the failure fingerprints, grouped by where and why transactions fail." |
+| 2:20 | Open the **failed transaction** from `demo_picks.py` | Show narrative, then the decoded instruction | "Click any transaction. Plain-language narrative, the error with the program's own message from its on-chain IDL, and the call tree showing which program failed and what it cost." |
+| 2:35 | Open the **swap** from `demo_picks.py` | Show Value flow | "And for a swap, where the value moved and what it was worth in dollars, priced by Blur." |
+| 2:45 | Back to the Overview | Final shot | "Vortex Sentinel: incidents, not transactions. Open source, built on Solami gRPC, RPC, Blur and Beam. One command to run it on your own program." |
+
+If you are running over three minutes, cut the **finder** segment (0:40 to 0:55). The alert is the part that matters most.
+
+## Numbers you can say, because they were measured
+
+- About **410 transactions per second** from three programs, **0.0 s behind the chain**, over a 370 ms link.
+- Detection latency recorded on incidents: **25 to 680 ms** after the triggering transaction reached Sentinel.
+- Authority lookup on Solami RPC: all 11 programs resolved in **about 7 s**, against about 26 s on the public RPC.
+- Blur prices thousands of tokens within minutes.
+
+## Honest claims (so nothing you say can be caught out)
+
+- **Mirage** is the gRPC failover. Say it is "configured as failover" only if the tile shows **Standby**. If it says "Not set", leave it out of the voice-over.
+- **Beam** is read-side: Sentinel shows how a transaction landed. It does not send through Beam. The tile's "checked" count rises as you open transactions.
+- Vortex predates the bounty, but the decoder, hub and Mirage transport were written for it. The README's "Built on Vortex" section has the commit links.
 
 ## If something goes wrong live
 
-- **No natural spike during recording:** use the canary. It's deterministic.
-- **The stream shows "Waiting for data":** check the key's gRPC access. The Pro trial covers it.
-- **Blur shows "error":** the key lacks `DataApi`. Set `BLUR_API_KEY` or skip the USD line. Everything else still works.
+- **"behind" turns amber:** the stream is catching up. Cut, wait a minute, resume. Do not watch Pump.fun.
+- **Status bar says "Feed stalled":** Sentinel pauses its detectors on purpose and shows it. Wait for it to recover, or restart.
+- **The alert does not appear in Discord:** open the Deliveries table. It shows the HTTP status. A 4xx means the webhook URL is wrong.
+- **Nothing fires:** the rule only fires for programs you watch. Make sure Jupiter has the star next to it in the sidebar.
+- **The wallet does not connect:** unlock it, refresh, try once more. You can record the sign-in separately and edit it in.
+- **No failed transaction yet from `demo_picks.py`:** wait a minute. Jupiter fails 60 to 80% of the time, so it comes quickly.
+
+## Optional: a deliberately broken program on camera
+
+For a controlled failure instead of a natural one, `examples/canary.rs` sends real failing Memo transactions through your Solami RPC (about 5,000 lamports each):
+
+```bash
+cargo run --example canary -- --count 8 --fail
+```
+
+Watch the canary wallet in Sentinel and add a rule such as "Failed transactions exceed 3 over 60s". It needs a funded `canary-keypair.json`. You do not need it for the demo above.

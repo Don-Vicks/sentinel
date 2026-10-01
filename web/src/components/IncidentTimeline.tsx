@@ -46,6 +46,32 @@ function primary(inc: Incident, tl: Timeline) {
         ],
         format: (v: number) => compact(v),
       };
+    case 'rule_triggered': {
+      // Draw the metric the rule watches, with the rule's threshold.
+      const ref = inc.threshold ? [{ value: inc.threshold, label: 'threshold' }] : [];
+      if (inc.metric === 'tps') {
+        return {
+          title: 'Transactions per second',
+          series: [{ label: 'TPS', values: pts.map((p) => p.tps), color: SERIES[0] }],
+          refs: ref,
+          format: (v: number) => compact(v),
+        };
+      }
+      if (inc.metric === 'avg_compute' || inc.metric === 'max_compute') {
+        return {
+          title: 'Average compute units per transaction',
+          series: [{ label: 'avg CU', values: pts.map((p) => (p.tx ? p.avg_cu : null)), color: SERIES[0] }],
+          refs: inc.metric === 'avg_compute' ? ref : [],
+          format: (v: number) => compact(v),
+        };
+      }
+      return {
+        title: 'Failure rate',
+        series: [{ label: 'failure rate', values: pts.map((p) => (p.tx ? p.failure_rate : null)), color: SERIES[0] }],
+        refs: inc.metric === 'failure_rate' ? ref : [],
+        format: (v: number) => pct(v, 0),
+      };
+    }
     case 'large_transfer':
       return {
         title: 'Transactions per second (context)',

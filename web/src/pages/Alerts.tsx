@@ -52,6 +52,14 @@ function describe(c: Condition) {
   }
 }
 
+/** One-click starting points. Each fills the form; nothing is created until you press Create rule. */
+const PRESETS: { label: string; hint: string; template: Template; value: string; window?: string; severity: Severity; name: string }[] = [
+  { label: 'Failure rate above 50%', hint: 'Fires on busy programs within seconds', template: 'failure_rate', value: '50', window: '60', severity: 'high', name: 'Failure rate above 50%' },
+  { label: 'Traffic above 300 TPS', hint: 'A surge in activity', template: 'tps', value: '300', window: '10', severity: 'medium', name: 'Traffic above 300 TPS' },
+  { label: 'Transfer worth $10K+', hint: 'USD priced by Solami Blur', template: 'transfer_usd', value: '10000', severity: 'medium', name: 'Transfer worth $10K or more' },
+  { label: 'Any incident', hint: 'Forward every detector incident', template: 'incident', value: '0', severity: 'high', name: 'Every incident' },
+];
+
 function RuleForm({ onCreated }: { onCreated: () => void }) {
   const { programs: all } = usePrograms();
   const { watching } = useAuth();
@@ -71,6 +79,14 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
   const tpl = TEMPLATES.find((t) => t.id === template)!;
+  const applyPreset = (p: (typeof PRESETS)[number]) => {
+    setName(p.name);
+    setTemplate(p.template);
+    setValue(p.value);
+    if (p.window) setWindowSecs(p.window);
+    setSeverity(p.severity);
+    setError(null);
+  };
 
   const condition = (): Condition => {
     const v = Number(value);
@@ -115,6 +131,16 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <Link to="/" className="underline underline-offset-2">Watch a program</Link> first.
         </p>
       )}
+      <div>
+        <p className="label">Quick start</p>
+        <div className="flex flex-wrap gap-2">
+          {PRESETS.map((p) => (
+            <button key={p.label} type="button" className="btn h-8 text-xs" title={p.hint} onClick={() => applyPreset(p)}>
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <div className="grid gap-3 md:grid-cols-2">
         <div>
           <label className="label" htmlFor="rule-name">Name</label>
@@ -237,7 +263,11 @@ function AlertsBody() {
   const label = (id: string | null) => (id ? programs.find((p) => p.program_id === id)?.label ?? short(id) : 'All programs');
 
   useLive((e) => {
-    if (e.type === 'alert') executions.setData((prev) => [e.execution, ...(prev ?? [])].slice(0, 100));
+    if (e.type === 'alert') {
+      executions.setData((prev) => [e.execution, ...(prev ?? [])].slice(0, 100));
+      // "Last fired" changed on the rule too.
+      rules.reload();
+    }
   });
 
   const toggle = async (r: AlertRule) => {

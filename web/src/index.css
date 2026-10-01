@@ -144,3 +144,75 @@
     }
   }
 }
+
+/* Unlayered on purpose: Tailwind's own `table` utility shares our class name and would
+   otherwise win over a rule in the components layer. */
+/* Below 640px a stacked table turns each row into a card of labeled fields, instead of a
+   wide table squeezed into a phone. Cells say what they are with data-label; the row's
+   title is data-primary; data-wide cells take the full width (bars, long values). */
+@media (max-width: 639px) {
+  .table-stack,
+  .table-stack tbody {
+    display: block;
+    width: 100%;
+  }
+  .table-stack thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+  .table-stack tr {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.35rem 1rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid var(--color-line);
+  }
+  .table-stack tr:last-child {
+    border-bottom: 0;
+  }
+  .table-stack td,
+  .table-stack tr:last-child td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    text-align: right;
+    max-width: none;
+    white-space: normal;
+  }
+  .table-stack td[data-label]::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    font-size: 0.75rem;
+    font-weight: 400;
+    color: var(--color-ink-3);
+    text-align: left;
+  }
+  .table-stack td[data-primary] {
+    grid-column: 1 / -1;
+    display: block;
+    text-align: left;
+    font-weight: 500;
+  }
+  .table-stack td[data-primary]::before {
+    content: none;
+  }
+  .table-stack td[data-wide] {
+    grid-column: 1 / -1;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: 0.15rem;
+    text-align: left;
+  }
+  .table-stack td[data-wide] > * {
+    min-width: 0;
+  }
+}
+
