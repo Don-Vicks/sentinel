@@ -127,6 +127,8 @@ pub struct StreamHealth {
     pub transport: &'static str,
     /// The chain tip stopped advancing: Sentinel isn't receiving data, so detectors are paused.
     pub stalled: bool,
+    /// Slots between the chain tip (read over RPC) and the newest slot the stream has delivered.
+    pub behind_chain_slots: Option<u64>,
     /// Solami Blur price feed used for USD values.
     pub pricing: crate::pricing::PricingStatus,
 }

@@ -68,6 +68,12 @@ function StatusBar() {
         <span className="text-ink-3">slot</span>
         <span className="num text-ink">{stream?.last_slot ? num(stream.last_slot) : '—'}</span>
       </span>
+      <span className={item} title="How far the stream is behind the real chain tip, measured over RPC (a slot is about 0.4 s)">
+        <span className="text-ink-3">behind</span>
+        <span className={`num ${(stream?.behind_chain_slots ?? 0) > 25 ? 'text-warn' : 'text-ink'}`}>
+          {stream?.behind_chain_slots != null ? `${(stream.behind_chain_slots * 0.4).toFixed(1)}s` : '—'}
+        </span>
+      </span>
       <span className={item} title="Slots between the chain tip on the stream and the newest transaction">
         <span className="text-ink-3">lag</span>
         <span className="num text-ink">{stream ? stream.slot_lag : '—'}</span>

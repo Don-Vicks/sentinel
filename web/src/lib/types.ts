@@ -156,6 +156,8 @@ export interface StreamHealth {
   transport?: 'grpc' | 'mirage';
   /** The chain tip stopped advancing: no data is arriving, so detectors are paused. */
   stalled?: boolean;
+  /** Slots between the real chain tip (over RPC) and the newest slot the stream delivered. */
+  behind_chain_slots?: number | null;
   pricing: {
     enabled: boolean;
     priced_mints: number;

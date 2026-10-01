@@ -88,15 +88,16 @@ Measured with `cargo run --release --example bench` on real mainnet Pump.fun tra
 
 Pump.fun, one of the busiest programs on Solana, runs well below both. Detection runs on a 1-second tick. Each incident records its own detection latency, measured from the triggering transaction reaching Sentinel.
 
-**Live on Solami gRPC (Oct 1, 2026),** Pump.fun and Jupiter v6 together, about 17 minutes:
+**Live on Solami gRPC (Oct 1, 2026),** Pump.fun and Jupiter v6 together, over a 370 ms round-trip link:
 
 | | |
 |---|---|
-| Transactions ingested | 232,000, with none dropped |
-| Sustained rate | roughly 90 to 380 tx/s combined, 0 slots of lag behind the stream |
-| Newest transaction when sampled | 7 to 20 ms old |
+| Throughput | up to about 570 tx/s combined, and 163,000 transactions in 8 minutes with none dropped |
+| Freshness | 0 slots behind the chain tip, measured against the tip read over RPC every 5 seconds (shown as "behind" in the status bar) |
 | Detection latency recorded on incidents | 25 to 680 ms |
-| Stream behaviour | Solami closed the stream about every 1 to 2.5 minutes; Vortex reconnected each time within about a second |
+| Token prices | about 4,000 mints priced through Blur within 8 minutes |
+
+**What the stream taught us.** On a long-latency link the default HTTP/2 window (64 KB) caps one stream at window ÷ round-trip time, about 170 KB/s here. With default settings the same subscription delivered 293 tx/s and ran about 25 seconds behind the chain; Solami's buffer filled and the server dropped the connection every minute or two. Vortex's client now uses 16 MB / 32 MB windows, adaptive windowing and gzip, which delivered 540 to 640 tx/s and 0 to 11 seconds of lag in the same test. The remaining drops are the server's buffer policy (`grpc_buffer_size`), which is an account setting. Run Sentinel close to the endpoint if you can; a hosted instance in the same region removes most of this.
 
 Both programs fail 55 to 80% of the time in steady state, mostly arbitrage bots losing races, so a failure-rate alert has to judge them against their own baseline, not a fixed number. Tuning on this traffic is what produced the error-spike rules above: the first untuned run opened 23 incidents in ten minutes, the tuned one 7 in seventeen.
 

@@ -44,6 +44,8 @@ pub struct Sentinel {
     pub prices: Arc<PriceBook>,
     pub idls: Arc<IdlRegistry>,
     pub beam: crate::beam::BeamClient,
+    /// The chain tip according to RPC, and when it was read; the stream's freshness is judged against it.
+    chain_tip: Mutex<(u64, i64)>,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
@@ -199,6 +201,7 @@ impl Sentinel {
             owners: OwnerCache::default(),
             idls,
             beam: crate::beam::BeamClient::new(),
+            chain_tip: Mutex::new((0, 0)),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
@@ -223,6 +226,18 @@ impl Sentinel {
     /// Runs the ingest loop and the 1-second evaluation tick until the source closes.
     pub async fn run(self: Arc<Self>) {
         self.request_program_idls();
+        // How far behind the chain is the stream really? Only RPC can say.
+        if let Some(rpc) = self.rpc.clone() {
+            let this = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    if let Ok(slot) = rpc.get_slot_with_commitment(solana_sdk::commitment_config::CommitmentConfig::processed()).await {
+                        *this.chain_tip.lock().unwrap() = (slot, Utc::now().timestamp());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+        }
         let mut rx = self.source.subscribe();
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1004,6 +1019,12 @@ impl Sentinel {
             uptime_secs: (Utc::now() - hub.started_at).num_seconds(),
             transport: self.source.transport(),
             stalled: state.stalled,
+            behind_chain_slots: {
+                let (tip, at) = *self.chain_tip.lock().unwrap();
+                // A tip older than 30 s, or wildly different (simulation), says nothing.
+                let fresh = at > 0 && now - at < 30 && hub.last_slot > 0;
+                (fresh && tip.abs_diff(hub.last_slot) < 10_000).then(|| tip.saturating_sub(hub.last_slot))
+            },
             pricing: self.prices.status(),
         }
     }
