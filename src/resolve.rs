@@ -128,7 +128,7 @@ fn results() -> &'static Mutex<HashMap<String, (Instant, Resolution)>> {
 fn candidate(id: &str) -> Candidate {
     Candidate {
         program_id: id.to_string(),
-        name: known_name(id).map(String::from),
+        name: known_name(id).or_else(|| crate::catalog::name_of(id)).map(String::from),
         infra: INFRA.contains(&id),
     }
 }

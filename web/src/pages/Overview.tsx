@@ -11,6 +11,7 @@ import { Empty, ErrorState, HealthDot, PageHeader, Panel, Skeleton, Stat } from 
 import { Sparkline } from '../components/charts';
 import { Finder } from '../components/Finder';
 import { SolamiPanel } from '../components/SolamiPanel';
+import { Catalog } from '../components/Catalog';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 
 const STEPS = [
@@ -179,6 +180,7 @@ export function Overview() {
       )}
 
       <SolamiPanel />
+      <Catalog />
 
       {error ? (
         <ErrorState message={`Couldn't reach Sentinel: ${error}`} onRetry={reload} />

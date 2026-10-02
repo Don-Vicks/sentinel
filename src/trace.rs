@@ -139,6 +139,7 @@ pub fn program_label(program_id: &str, monitored: &HashMap<String, String>) -> S
         .get(program_id)
         .cloned()
         .or_else(|| programs::known_name(program_id).map(str::to_string))
+        .or_else(|| crate::catalog::name_of(program_id).map(str::to_string))
         .unwrap_or_else(|| short(program_id))
 }
 

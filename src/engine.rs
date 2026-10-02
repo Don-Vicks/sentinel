@@ -1218,6 +1218,7 @@ impl Sentinel {
         let label = label
             .filter(|l| !l.trim().is_empty())
             .or_else(|| vortex::events::programs::known_name(&program_id).map(str::to_string))
+            .or_else(|| crate::catalog::name_of(&program_id).map(str::to_string))
             .unwrap_or_else(|| crate::analyze::short(&program_id));
         let program = {
             let mut state = self.state.lock().unwrap();

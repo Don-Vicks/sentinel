@@ -8,6 +8,7 @@ pub mod alerts;
 pub mod analyze;
 pub mod auth;
 pub mod beam;
+pub mod catalog;
 pub mod api;
 pub mod detect;
 pub mod engine;

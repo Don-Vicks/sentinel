@@ -49,6 +49,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/auth/me", get(auth_me))
         .route("/api/status", get(status))
         .route("/api/solami", get(solami))
+        .route("/api/catalog", get(catalog))
         .route("/api/resolve", post(resolve))
         .route("/api/programs", get(list_programs).post(add_program))
         .route(
@@ -126,6 +127,14 @@ async fn status(State(s): State<AppState>, Viewer(account): Viewer) -> ApiResult
         "series": s.programs_series(300),
         "now": Utc::now(),
     })))
+}
+
+/// Well-known programs, plus a balanced set for demos.
+async fn catalog() -> Json<Value> {
+    Json(json!({
+        "programs": crate::catalog::CATALOG,
+        "showcase": crate::catalog::showcase().iter().map(|e| e.id).collect::<Vec<_>>(),
+    }))
 }
 
 /// What each Solami product is doing for this instance.
