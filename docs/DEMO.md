@@ -10,6 +10,54 @@ Leave **Meteora DLMM, Pump.fun and PumpSwap** out of a recording. Their messages
 
 The showcase set mixes busy programs (Jupiter v6, Orca Whirlpool, Raydium) with quiet ones (Squads, Kamino, MarginFi, Wormhole, Streamflow). Quiet programs are where the interesting incidents come from: a single $2M transfer through Squads, or $107K of USDC through Kamino, is a real incident here.
 
+## Before recording (do this 20 minutes ahead)
+
+**1. Start everything with one command**
+
+```bash
+cd ~/Developer/rust-projects/vortex-sentinel
+./scripts/demo.sh
+```
+
+That builds the dashboard and Sentinel if they changed, starts the **API and the dashboard together on http://localhost:8080** (one process, one port), loads the 15-program showcase set, waits until it is healthy, and prints a checklist like this:
+
+```
+  [ OK ] Solami gRPC streaming   80 tx/s
+  [ OK ] Behind the chain       0.0s
+  [ OK ] Blur prices            197 tokens
+  [ OK ] Programs monitored     15 of 15
+```
+
+Any line that says FAIL is the thing to fix before recording. It starts from a **fresh database** every time, so you get a clean Alerts page. Use `./scripts/demo.sh --keep` to keep the previous incidents, rules and watchlists. **Ctrl+C stops it.** The first run compiles Rust and takes a few minutes; later runs start in seconds. Detectors need about five minutes of history to arm, and a longer history makes the charts and timelines look much better, so start early.
+
+It needs a `.env` file with `YELLOWSTONE_ENDPOINT`, `YELLOWSTONE_TOKEN` and `SOLANA_RPC_URL`, plus `BLUR_API_KEY` for dollar values. It also lifts the default limit of 10 programs per wallet to 40, so the **Watch showcase set** button works.
+
+**2. Check the screen is healthy.** All of these must be true before you press record:
+
+- [ ] Top bar says **Live**, **behind** is 1.0 s or less, and **blur** shows a number of priced tokens (not "error").
+- [ ] On the Overview, the **Powered by Solami** panel shows green dots for gRPC, RPC + Comet, Blur and Beam, and the program table lists 15 programs with real names. (Mirage shows "Not set" unless you configured it. That is fine; see the honest claims below.)
+- [ ] No amber "behind" figure. If it is amber, wait a minute. If it stays amber, restart with `./scripts/demo.sh`.
+
+**3. Get a webhook destination.** The nicest on camera is a Discord channel in a second window: Server Settings, then Integrations, then Webhooks, then New Webhook, then Copy URL. Sentinel formats Discord messages natively. Fallback: a free URL from webhook.site.
+
+**4. Sign in once and rehearse the alert** in a throwaway Discord channel, so you know it works. Then **delete the rule** from the Alerts page so you create it fresh on camera. Any Solana wallet works (Phantom, Backpack, Solflare). Signing in costs nothing and sends no transaction. Because the demo starts from a fresh database, you will sign in again after each restart.
+
+**5. Pre-warm the finder.** Paste Pump.fun's upgrade authority into the box once, so the lookup is instant on camera (the first lookup takes about 7 seconds):
+
+```
+7gZufwwAo17y5kg8FMyJy2phgpvv9RSdzWtdXiWHjFr8
+```
+
+**6. Pick your two transactions.** This prints a failed transaction and a USD-priced swap from live traffic:
+
+```bash
+python3 scripts/demo_picks.py
+```
+
+Keep both links in a notes file.
+
+**7. Screen.** 1440×900 or similar, one theme (light or dark) the whole way through, other tabs closed, notifications off. **Never show `.env`, the terminal environment or any API key.**
+
 ## Shot list
 
 Times are targets. The total should land between 2:40 and 3:00.
@@ -61,3 +109,18 @@ cargo run --example canary -- --count 8 --fail
 ```
 
 Watch the canary wallet in Sentinel and add a rule such as "Failed transactions exceed 3 over 60s". It needs a funded `canary-keypair.json`. You do not need it for the demo above.
+
+## Command cheat sheet
+
+| What | Command |
+|---|---|
+| Start everything (API + dashboard) | `./scripts/demo.sh` |
+| Start, keeping the old database | `./scripts/demo.sh --keep` |
+| Stop | `Ctrl+C` in that terminal, or `pkill -f target/release/sentinel` from another |
+| Is it healthy? | `curl -s localhost:8080/api/solami \| python3 -m json.tool` |
+| Stream and program status | `curl -s localhost:8080/api/status` |
+| Incidents so far | `curl -s localhost:8080/api/incidents` |
+| A failed transaction and a USD-priced swap to open on camera | `python3 scripts/demo_picks.py` |
+| Rebuild only the dashboard | `cd web && npm run build` |
+| Run the tests | `cargo test` |
+

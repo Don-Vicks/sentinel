@@ -123,6 +123,15 @@ cp .env.example .env        # add your Solami key
 docker compose up --build
 ```
 
+### Demo mode (from source, one command)
+
+```bash
+cp .env.example .env        # add your Solami keys
+./scripts/demo.sh           # builds, starts the API and dashboard on :8080, prints a health checklist
+```
+
+It watches a 15-program showcase set, starts from a fresh database (`--keep` to keep it) and stops on Ctrl+C. See [docs/DEMO.md](docs/DEMO.md).
+
 ### From source
 
 Prerequisites: Rust 1.75+, Node 18+, and `protoc` (Vortex compiles Jito protos). Cargo pulls Vortex from [Don-Vicks/vortex](https://github.com/Don-Vicks/vortex) automatically.
