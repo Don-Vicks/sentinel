@@ -3,6 +3,7 @@ import { getWallets } from '@wallet-standard/app';
 import type { Wallet, WalletAccount } from '@wallet-standard/base';
 import bs58 from 'bs58';
 import { api, send } from './api';
+import { live } from './live';
 
 type ConnectFeature = {
   'standard:connect': { connect(input?: { silent?: boolean }): Promise<{ accounts: readonly WalletAccount[] }> };
@@ -96,6 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         signature: bs58.encode(signed.signature),
       });
       await refresh();
+      live.reconnect();
       setDialogOpen(false);
       // The session lives in our cookie; the wallet connection isn't needed anymore.
       await (wallet.features as unknown as DisconnectFeature)['standard:disconnect']?.disconnect().catch(() => {});
@@ -106,6 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await send('POST', '/api/auth/logout');
     setMe({ account: null, watching: [] });
+    live.reconnect();
   }, []);
 
   return (

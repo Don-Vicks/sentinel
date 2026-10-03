@@ -370,7 +370,7 @@ export function TimelineChart({
             const px = x(m.t);
             // Close markers (onset → detected is often seconds): first label
             // hangs left of its line, the rest to the right.
-            const crowded = all.length > 1 && all.some((o) => o !== m && Math.abs(x(o.t) - px) < 70);
+            const crowded = all.length > 1 && all.some((o) => o !== m && Math.abs(x(o.t) - px) < 120);
             const anchor =
               px > width - 80 ? 'end' : px < PAD.left + 50 ? 'start' : crowded && i === 0 ? 'end' : 'start';
             return (

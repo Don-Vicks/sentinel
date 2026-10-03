@@ -46,6 +46,8 @@ pub struct Sentinel {
     pub beam: crate::beam::BeamClient,
     /// The chain tip according to RPC, and when it was read; the stream's freshness is judged against it.
     chain_tip: Mutex<(u64, i64)>,
+    /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
+    rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
@@ -202,6 +204,7 @@ impl Sentinel {
             idls,
             beam: crate::beam::BeamClient::new(),
             chain_tip: Mutex::new((0, 0)),
+            rpc_txs: Mutex::new(HashMap::new()),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
@@ -1141,10 +1144,32 @@ impl Sentinel {
         if let Some(tx) = self.store.stored_transaction(signature)? {
             return Ok(Some(Arc::new(tx)));
         }
+        if let Some(tx) = self.rpc_txs.lock().unwrap().get(signature) {
+            return Ok(Some(tx.clone()));
+        }
         let Some(rpc) = &self.rpc else { return Ok(None) };
-        Ok(vortex::geyser::rpc_frame::fetch_transaction(&rpc.url(), signature)
-            .await?
-            .map(Arc::new))
+        // One dropped connection shouldn't fail a page: retry once, and keep what we fetched.
+        let mut last = None;
+        for attempt in 0..2u64 {
+            match vortex::geyser::rpc_frame::fetch_transaction(&rpc.url(), signature).await {
+                Ok(found) => {
+                    let found = found.map(Arc::new);
+                    if let Some(tx) = &found {
+                        let mut cache = self.rpc_txs.lock().unwrap();
+                        if cache.len() >= 256 {
+                            cache.clear();
+                        }
+                        cache.insert(signature.to_string(), tx.clone());
+                    }
+                    return Ok(found);
+                }
+                Err(e) => {
+                    last = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt + 1))).await;
+                }
+            }
+        }
+        Err(last.expect("two attempts"))
     }
 
     pub fn program_labels(&self) -> HashMap<String, String> {

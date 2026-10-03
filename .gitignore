@@ -9,3 +9,6 @@ canary-keypair.json
 .DS_Store
 *.tsbuildinfo
 .cargo/
+
+# demo recording working files (audio, video, frames)
+demo/

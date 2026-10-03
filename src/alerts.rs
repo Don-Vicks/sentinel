@@ -135,7 +135,7 @@ impl Dispatcher {
             return exec;
         };
         if let Err(e) = check_webhook_url(&url, self.allow_private).await {
-            exec.error = Some(e.to_string());
+            exec.error = Some(crate::redact::scrub(&e.to_string()));
             return exec;
         }
         let body = format_body(&url, &alert);
@@ -168,7 +168,7 @@ impl Dispatcher {
                         return exec;
                     }
                 }
-                Err(e) => exec.error = Some(e.to_string()),
+                Err(e) => exec.error = Some(crate::redact::scrub(&e.to_string())),
             }
             tokio::time::sleep(Duration::from_millis(500 * 3u64.pow(attempt - 1))).await;
         }

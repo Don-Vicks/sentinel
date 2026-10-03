@@ -25,13 +25,14 @@ pub struct ApiError(StatusCode, String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        (self.0, Json(json!({ "error": crate::redact::scrub(&self.1) }))).into_response()
     }
 }
 
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
-        ApiError(StatusCode::BAD_REQUEST, e.to_string())
+        // Client errors embed the request URL, which carries the Solami key.
+        ApiError(StatusCode::BAD_REQUEST, crate::redact::scrub(&format!("{e:#}")))
     }
 }
 

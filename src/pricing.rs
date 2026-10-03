@@ -164,7 +164,7 @@ impl PriceBook {
             }
             Err(e) => {
                 tracing::warn!(error = %e, "Blur price refresh failed");
-                status.last_error = Some(e);
+                status.last_error = Some(crate::redact::scrub(&e));
             }
         }
     }

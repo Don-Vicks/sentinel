@@ -87,6 +87,8 @@ If you are running over three minutes, cut the **finder** segment (0:40 to 0:55)
 
 ## Honest claims (so nothing you say can be caught out)
 
+- **The submitted video is a scripted recording of the live app**, with the narration recorded separately. A scripted browser clicks through the real running Sentinel against the real Solami stream; nothing is mocked. The sign-in step uses a stand-in wallet (a throwaway in-page key, shown as "Test Wallet") because a script cannot drive a browser extension. Say so in your submission.
+
 - **Mirage** is the gRPC failover. Say it is "configured as failover" only if the tile shows **Standby**. If it says "Not set", leave it out of the voice-over.
 - **Beam** is read-side: Sentinel shows how a transaction landed. It does not send through Beam. The tile's "checked" count rises as you open transactions.
 - Vortex predates the bounty, but the decoder, hub and Mirage transport were written for it. The README's "Built on Vortex" section has the commit links.

@@ -44,6 +44,15 @@ class LiveBus {
     this.statusListeners.forEach((f) => f(open));
   }
 
+  /** Reopens the stream. Private events (your alert deliveries) are filtered by who is
+   *  connected, so the stream has to be reopened after signing in or out. */
+  reconnect() {
+    this.source?.close();
+    this.source = null;
+    this.setOpen(false);
+    if (this.listeners.size > 0) this.connect();
+  }
+
   private connect() {
     if (this.source) return;
     const es = new EventSource('/api/stream');
