@@ -35,7 +35,7 @@ It needs a `.env` file with `YELLOWSTONE_ENDPOINT`, `YELLOWSTONE_TOKEN` and `SOL
 **2. Check the screen is healthy.** All of these must be true before you press record:
 
 - [ ] Top bar says **Live**, **behind** is 1.0 s or less, and **blur** shows a number of priced tokens (not "error").
-- [ ] On the Overview, the **Powered by Solami** panel shows green dots for gRPC, RPC + Comet, Blur and Beam, and the program table lists 15 programs with real names. (Mirage shows "Not set" unless you configured it. That is fine; see the honest claims below.)
+- [ ] On the Overview, the **Powered by Solami** panel shows green dots for gRPC, RPC + Comet, Blur and Beam, and the program table lists 15 programs with real names. (Mirage shows "Off" unless the key has Mirage permissions. That is fine; see the honest claims below.)
 - [ ] No amber "behind" figure. If it is amber, wait a minute. If it stays amber, restart with `./scripts/demo.sh`.
 
 **3. Get a webhook destination.** The nicest on camera is a Discord channel in a second window: Server Settings, then Integrations, then Webhooks, then New Webhook, then Copy URL. Sentinel formats Discord messages natively. Fallback: a free URL from webhook.site.
@@ -89,7 +89,7 @@ If you are running over three minutes, cut the **finder** segment (0:40 to 0:55)
 
 - **The submitted video is a scripted recording of the live app**, with the narration recorded separately. A scripted browser clicks through the real running Sentinel against the real Solami stream; nothing is mocked. The sign-in step uses a stand-in wallet (a throwaway in-page key, shown as "Test Wallet") because a script cannot drive a browser extension. Say so in your submission.
 
-- **Mirage** is the gRPC failover. Say it is "configured as failover" only if the tile shows **Standby**. If it says "Not set", leave it out of the voice-over.
+- **Mirage** is the gRPC failover. Say it is "configured as failover" only if the tile shows **Standby**. If it says **Off**, leave it out of the voice-over. To turn it on, give the Solami key the MirageView, MirageManage and MirageStream permissions; Sentinel then creates and maintains the subscription itself.
 - **Beam** is read-side: Sentinel shows how a transaction landed. It does not send through Beam. The tile's "checked" count rises as you open transactions.
 - Vortex predates the bounty, but the decoder, hub and Mirage transport were written for it. The README's "Built on Vortex" section has the commit links.
 

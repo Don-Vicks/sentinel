@@ -81,8 +81,14 @@ export function SolamiPanel() {
           name="Mirage"
           role="WebSocket stream, gRPC failover"
           tone={s.mirage.active ? 'warn' : s.mirage.configured ? 'good' : 'off'}
-          value={s.mirage.active ? 'In use' : s.mirage.configured ? 'Standby' : 'Not set'}
-          caption={s.mirage.configured ? 'Takes over if gRPC cannot connect' : 'Set MIRAGE_STREAM_URL to enable failover'}
+          value={s.mirage.active ? 'In use' : s.mirage.configured ? 'Standby' : 'Off'}
+          caption={
+            s.mirage.active
+              ? 'gRPC could not connect, so the stream is running on Mirage'
+              : s.mirage.configured
+                ? 'Takes over if gRPC cannot connect, and follows the watchlist'
+                : 'Optional failover for the gRPC stream'
+          }
         />
         <Tile
           name="Beam"

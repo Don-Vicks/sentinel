@@ -1053,7 +1053,7 @@ impl Sentinel {
             rpc: RpcStatus { enabled: self.rpc.is_some(), idls_loaded: self.idls.loaded() },
             blur: BlurStatus { enabled: pricing.enabled, priced_mints: pricing.priced_mints, error: pricing.last_error },
             mirage: MirageStatus {
-                configured: std::env::var("MIRAGE_STREAM_URL").is_ok_and(|u| !u.is_empty()),
+                configured: crate::mirage_setup::handle().state() == crate::mirage_setup::State::Ready,
                 active: stream.transport == "mirage",
             },
             beam: BeamStatus { lookups, carried },

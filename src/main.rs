@@ -40,10 +40,13 @@ async fn main() -> Result<()> {
     let (event_tx, mut event_rx) = mpsc::channel::<GeyserEvent>(20_000);
     let filters = hub.stream_filters();
     let simulating = simulate.is_some();
-    // Mirage (the same Yellowstone frames over a WebSocket) is the failover
-    // when gRPC can't connect. Its filter is a saved subscription on Solami's side.
-    let mirage_url = env::var("MIRAGE_STREAM_URL").ok().filter(|u| !u.is_empty());
-    let mirage_first = mirage_url.is_some() && env::var("SENTINEL_TRANSPORT").is_ok_and(|t| t == "mirage");
+    // Mirage (the same Yellowstone frames over a WebSocket) is the failover when gRPC can't
+    // connect. Sentinel sets the subscription up and keeps it in step with the watchlist itself.
+    let mirage = sentinel::mirage_setup::handle().clone();
+    if !simulating {
+        tokio::spawn(sentinel::mirage_setup::run(filters.clone()));
+    }
+    let mirage_first = env::var("SENTINEL_TRANSPORT").is_ok_and(|t| t == "mirage");
     let stream_hub = hub.clone();
     tokio::spawn(async move {
         if simulating {
@@ -69,7 +72,14 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            if let Some(url) = mirage_url.as_deref().filter(|_| mirage_first || failures >= 3) {
+            let url = if mirage_first {
+                mirage.wait_url(Duration::from_secs(30)).await
+            } else if failures >= 3 {
+                mirage.url()
+            } else {
+                None
+            };
+            if let Some(url) = url.as_deref() {
                 tracing::warn!("Solami gRPC unavailable; streaming through Mirage");
                 stream_hub.set_transport("mirage");
                 let began = std::time::Instant::now();

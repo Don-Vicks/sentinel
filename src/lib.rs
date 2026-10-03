@@ -16,6 +16,7 @@ pub mod idl;
 pub mod limits;
 pub mod live;
 pub mod metrics;
+pub mod mirage_setup;
 pub mod simulate;
 pub mod model;
 pub mod pricing;
