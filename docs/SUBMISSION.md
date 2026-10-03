@@ -1,6 +1,6 @@
 # Submission draft: Superteam Earn, "Build something live on Solana data" (Solami)
 
-Fill in the two links marked TODO after recording. Paste each section into the matching form field.
+Fill in the link marked TODO (the demo video) once it is uploaded. Paste each section into the matching form field.
 
 **Project name:** Vortex Sentinel
 
@@ -10,7 +10,7 @@ Fill in the two links marked TODO after recording. Paste each section into the m
 - Repo: https://github.com/Don-Vicks/sentinel
 - Vortex (the streaming and decoding layer it runs on): https://github.com/Don-Vicks/vortex
 - Demo video: TODO
-- Live instance: TODO (optional)
+- Live instance: https://sentinel-production-25a1.up.railway.app (watching a set of programs on mainnet; sign in with any Solana wallet to keep your own watchlist and alerts)
 
 ## Description
 
