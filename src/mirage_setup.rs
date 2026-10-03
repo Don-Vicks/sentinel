@@ -13,7 +13,13 @@ use vortex::geyser::stream::StreamFilters;
 
 const DEFAULT_API: &str = "https://api.solami.dev";
 const DEFAULT_WS: &str = "wss://ws.solami.dev";
-const LABEL: &str = "sentinel";
+const DEFAULT_LABEL: &str = "sentinel";
+
+/// The subscription's name on the Solami account. Instances sharing one account give themselves
+/// different labels (MIRAGE_LABEL) so they don't rewrite each other's watched programs.
+fn label() -> String {
+    std::env::var("MIRAGE_LABEL").ok().filter(|l| !l.trim().is_empty()).unwrap_or_else(|| DEFAULT_LABEL.into())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -114,7 +120,7 @@ impl Mirage {
             bail!("no programs to subscribe to yet");
         }
         let listed = self.call("/mirage/list", json!({})).await?;
-        let existing = Self::items(&listed).into_iter().find(|s| s["label"] == LABEL).and_then(|s| s["id"].as_str().map(String::from));
+        let existing = Self::items(&listed).into_iter().find(|s| s["label"] == label().as_str()).and_then(|s| s["id"].as_str().map(String::from));
         let id = match existing {
             Some(id) => {
                 // Make sure it watches what we watch now.
@@ -122,7 +128,7 @@ impl Mirage {
                 id
             }
             None => {
-                let made = self.call("/mirage/create", json!({ "label": LABEL, "filter": Self::filter(programs) })).await?;
+                let made = self.call("/mirage/create", json!({ "label": label(), "filter": Self::filter(programs) })).await?;
                 made["id"].as_str().map(String::from).ok_or_else(|| anyhow!("Mirage create returned no id"))?
             }
         };
@@ -192,7 +198,7 @@ pub async fn run(mut filters: tokio::sync::watch::Receiver<StreamFilters>) {
                 let m = Mirage::new(&api, &ws, key);
                 match m.ensure(&programs).await {
                     Ok(url) => {
-                        tracing::info!("Mirage failover is ready (subscription \"{LABEL}\")");
+                        tracing::info!("Mirage failover is ready (subscription \"{}\")", label());
                         h.set(Some(url));
                         manager = Some(m);
                         break;

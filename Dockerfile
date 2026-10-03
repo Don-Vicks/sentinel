@@ -24,10 +24,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 WORKDIR /app
 COPY --from=build /src/target/release/sentinel /usr/local/bin/sentinel
 COPY --from=web /web/dist ./web/dist
+# The database lives in /data. Mount a volume there to keep it across restarts: docker-compose
+# does (see docker-compose.yml) and on Railway you add a Volume at /data. A Dockerfile VOLUME
+# instruction is deliberately not used: Railway rejects it.
+RUN mkdir -p /data
 ENV SENTINEL_WEB_DIR=/app/web/dist \
     SENTINEL_DB=/data/sentinel.db \
-    SENTINEL_PORT=8080 \
     RUST_LOG=info,h2=warn,hyper=warn,tower=warn
-VOLUME /data
+# The port comes from SENTINEL_PORT, else PORT (Railway sets it), else 8080.
 EXPOSE 8080
 CMD ["sentinel"]

@@ -1,0 +1,11 @@
+# Railway: build the Dockerfile, wait for the API to answer before routing traffic, and restart
+# on failure. Settings (Solami keys and so on) are service variables, never committed.
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/api/status"
+healthcheckTimeout = 180
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

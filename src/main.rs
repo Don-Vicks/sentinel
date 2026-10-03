@@ -25,7 +25,12 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let port: u16 = env::var("SENTINEL_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8080);
+    // SENTINEL_PORT wins; hosting platforms such as Railway provide PORT.
+    let port: u16 = env::var("SENTINEL_PORT")
+        .or_else(|_| env::var("PORT"))
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(8080);
     let db_path = env::var("SENTINEL_DB").unwrap_or_else(|_| "sentinel.db".into());
     let public_url =
         env::var("SENTINEL_PUBLIC_URL").unwrap_or_else(|_| format!("http://localhost:{port}"));

@@ -123,6 +123,17 @@ cp .env.example .env        # add your Solami key
 docker compose up --build
 ```
 
+### Railway
+
+The repo deploys as-is (`Dockerfile` + `railway.toml`). Create a service from the repo, then:
+
+1. **Variables:** `YELLOWSTONE_ENDPOINT`, `YELLOWSTONE_TOKEN`, `SOLANA_RPC_URL`, and `BLUR_API_KEY` for dollar values. Optionally `SENTINEL_PROGRAMS` (comma-separated program IDs to watch at startup).
+2. **Volume:** add one mounted at `/data`, so incident history survives restarts. (A Dockerfile `VOLUME` instruction is not used because Railway rejects it.)
+3. **Domain:** generate one, then set `SENTINEL_PUBLIC_URL` to it (`https://...`). Wallet sign-in is bound to that address.
+4. **Behind the proxy:** set `SENTINEL_TRUST_PROXY=1` so per-IP rate limits see real client addresses.
+
+The port comes from `SENTINEL_PORT`, else Railway's `PORT`, else 8080. An always-on instance pays for every byte it streams from Solami, so watch a small set of programs. If several instances share one Solami account, give each its own `MIRAGE_LABEL`.
+
 ### Demo mode (from source, one command)
 
 ```bash
@@ -157,6 +168,8 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `MIRAGE_API_KEY` | `BLUR_API_KEY`, then `YELLOWSTONE_TOKEN` | Key for Mirage, which needs `MirageView`, `MirageManage` and `MirageStream`. Sentinel creates and maintains the subscription; no URL needed |
 | `MIRAGE_STREAM_URL` | — | Manual override: a ready-made stream URL (`wss://ws.solami.dev/mirage/stream/{id}?api_key=…`). Not needed normally |
 | `SENTINEL_MIRAGE` | `auto` | Set to `off` to disable Mirage failover |
+| `MIRAGE_LABEL` | `sentinel` | Name of this instance's Mirage subscription; give each instance on one account its own |
+| `PORT` | — | Used when `SENTINEL_PORT` is unset (hosting platforms set it) |
 | `SENTINEL_TRANSPORT` | `grpc` | Set to `mirage` to use Mirage as the primary transport |
 | `SENTINEL_PROGRAMS` | — | Comma-separated program IDs to monitor at startup |
 | `SENTINEL_PORT` | `8080` | HTTP port (API + dashboard) |
