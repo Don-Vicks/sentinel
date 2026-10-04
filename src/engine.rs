@@ -24,9 +24,9 @@ use tokio::sync::broadcast;
 use vortex::events::{TransferKind, VortexTransaction};
 
 const RECENT_SUMMARIES: usize = 500;
-const RECENT_FULL: usize = 3_000;
-const TX_INDEX_CAP: usize = 10_000;
-const MAX_LINKED_PER_INCIDENT: i64 = 300;
+const RECENT_FULL: usize = 1_500;
+const TX_INDEX_CAP: usize = 5_000;
+const MAX_LINKED_PER_INCIDENT: i64 = 100;
 const FEED_BATCH: usize = 60;
 /// Event-driven incidents (large transfers, transfer rules) close after this
 /// long without a new matching transaction.

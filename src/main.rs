@@ -142,6 +142,20 @@ async fn main() -> Result<()> {
     }
 
     let store = Arc::new(Store::open(&db_path)?);
+    // Retention: keep the database inside a budget so a small volume never fills.
+    let retain_hours: i64 = env::var("SENTINEL_RETAIN_HOURS").ok().and_then(|v| v.parse().ok()).unwrap_or(48);
+    let max_db_mb: i64 = env::var("SENTINEL_MAX_DB_MB").ok().and_then(|v| v.parse().ok()).unwrap_or(250);
+    {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || loop {
+            match store.prune(retain_hours, max_db_mb * 1024 * 1024) {
+                Ok(n) if n > 0 => tracing::info!(removed = n, "pruned old incident data"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "prune failed"),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(600));
+        });
+    }
     let source: Arc<dyn VortexSource> = hub.clone();
     let sentinel = Sentinel::new(store, source, rpc, prices, public_url.clone())?;
 

@@ -7,6 +7,7 @@ use crate::model::{AlertExecution, AlertRule, Incident, MonitoredProgram, TxSumm
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 use vortex::events::VortexTransaction;
 
@@ -64,7 +65,78 @@ fn parse<T: DeserializeOwned>(s: String) -> rusqlite::Result<T> {
     })
 }
 
+/// Full transactions are stored gzip-compressed (a BLOB in the `tx` column).
+/// Rows written by older versions hold plain JSON text; both are readable.
+fn pack(tx: &VortexTransaction) -> Result<Vec<u8>> {
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    enc.write_all(&serde_json::to_vec(tx)?)?;
+    Ok(enc.finish()?)
+}
+
+fn unpack(v: rusqlite::types::ValueRef<'_>) -> rusqlite::Result<VortexTransaction> {
+    use rusqlite::types::ValueRef;
+    let conv = |e: Box<dyn std::error::Error + Send + Sync>| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, e)
+    };
+    match v {
+        ValueRef::Blob(b) => {
+            let mut json = Vec::new();
+            flate2::read::GzDecoder::new(b)
+                .read_to_end(&mut json)
+                .map_err(|e| conv(Box::new(e)))?;
+            serde_json::from_slice(&json).map_err(|e| conv(Box::new(e)))
+        }
+        ValueRef::Text(t) => serde_json::from_slice(t).map_err(|e| conv(Box::new(e))),
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            0,
+            "tx".into(),
+            v.data_type(),
+        )),
+    }
+}
+
 impl Store {
+    /// Keeps the database inside a budget: drops incidents (and their stored
+    /// transactions) older than `retain_hours`, trims old alert deliveries, and
+    /// if the live data still exceeds `max_bytes`, drops the oldest stored
+    /// transactions until it fits. Returns the number of rows removed.
+    pub fn prune(&self, retain_hours: i64, max_bytes: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = (chrono::Utc::now() - chrono::Duration::hours(retain_hours)).to_rfc3339();
+        let mut removed = conn.execute(
+            "DELETE FROM incident_transactions WHERE incident_id IN
+               (SELECT id FROM incidents WHERE detected_at < ?1 AND status = '\"resolved\"')",
+            [&cutoff],
+        )?;
+        removed += conn.execute(
+            "DELETE FROM incidents WHERE detected_at < ?1 AND status = '\"resolved\"'",
+            [&cutoff],
+        )?;
+        removed += conn.execute(
+            "DELETE FROM alert_executions WHERE id <= (SELECT MAX(id) FROM alert_executions) - 5000",
+            [],
+        )?;
+        let used = |c: &Connection| -> rusqlite::Result<i64> {
+            let pages: i64 = c.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+            let free: i64 = c.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+            let size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+            Ok((pages - free) * size)
+        };
+        while used(&conn)? > max_bytes {
+            let n = conn.execute(
+                "DELETE FROM incident_transactions WHERE rowid IN
+                   (SELECT rowid FROM incident_transactions ORDER BY rowid LIMIT 2000)",
+                [],
+            )?;
+            if n == 0 {
+                break;
+            }
+            removed += n;
+        }
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(removed)
+    }
+
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch(SCHEMA)?;
@@ -241,7 +313,7 @@ impl Store {
                 incident_id,
                 tx.signature,
                 serde_json::to_string(summary)?,
-                serde_json::to_string(tx)?
+                pack(tx)?
             ],
         )?;
         Ok(n > 0)
@@ -261,7 +333,7 @@ impl Store {
                     id,
                     tx.signature,
                     serde_json::to_string(summary)?,
-                    serde_json::to_string(tx.as_ref())?
+                    pack(tx.as_ref())?
                 ])?;
             }
         }
@@ -285,7 +357,7 @@ impl Store {
             .query_row(
                 "SELECT tx FROM incident_transactions WHERE signature = ?1 LIMIT 1",
                 [signature],
-                |r| parse(r.get(0)?),
+                |r| unpack(r.get_ref(0)?),
             )
             .optional()?)
     }

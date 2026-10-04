@@ -30,7 +30,7 @@ COPY --from=web /web/dist ./web/dist
 RUN mkdir -p /data
 ENV SENTINEL_WEB_DIR=/app/web/dist \
     SENTINEL_DB=/data/sentinel.db \
-    RUST_LOG=info,h2=warn,hyper=warn,tower=warn
+    MALLOC_ARENA_MAX=2 RUST_LOG=info,h2=warn,hyper=warn,tower=warn
 # The port comes from SENTINEL_PORT, else PORT (Railway sets it), else 8080.
 EXPOSE 8080
 CMD ["sentinel"]
