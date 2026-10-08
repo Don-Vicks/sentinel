@@ -13,6 +13,7 @@ import { Program } from './pages/Program';
 import { Incident, Incidents } from './pages/Incident';
 import { Transaction } from './pages/Transaction';
 import { Alerts } from './pages/Alerts';
+import { ProgramSummary } from './pages/Summary';
 import { Empty } from './components/ui';
 
 function NotFound() {
@@ -35,6 +36,7 @@ createRoot(document.getElementById('root')!).render(
           <Route element={<Layout />}>
             <Route index element={<Overview />} />
             <Route path="programs/:id" element={<Program />} />
+            <Route path="programs/:id/summary" element={<ProgramSummary />} />
             <Route path="incidents" element={<Incidents />} />
             <Route path="incidents/:id" element={<Incident />} />
             <Route path="tx/:sig" element={<Transaction />} />

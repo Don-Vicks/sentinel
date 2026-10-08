@@ -139,6 +139,21 @@ impl Auth {
         Ok(token)
     }
 
+    /// A new API token for agents. The plaintext is returned once; only its hash is kept.
+    pub fn create_api_token(&self, account: &str, name: &str, scope: &str) -> Result<(crate::model::ApiToken, String)> {
+        let token = format!("snt_{}", random_hex());
+        let record = self.store.create_api_token(&hash_token(&token), account, name, scope)?;
+        Ok((record, token))
+    }
+
+    /// Who an API token belongs to, and what it may do: (token id, account, scope).
+    pub fn api_token(&self, token: &str) -> Option<(i64, String, String)> {
+        if !token.starts_with("snt_") {
+            return None;
+        }
+        self.store.api_token_lookup(&hash_token(token)).ok().flatten()
+    }
+
     pub fn account_for(&self, token: &str) -> Option<String> {
         self.store.session_account(&hash_token(token)).ok().flatten()
     }

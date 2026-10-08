@@ -7,7 +7,9 @@ export type IncidentKind =
   | 'compute_spike'
   | 'large_transfer'
   | 'rule_triggered'
-  | 'error_spike';
+  | 'error_spike'
+  | 'authority_change'
+  | 'vault_drain';
 export type Health = 'healthy' | 'degraded' | 'critical' | 'warming_up' | 'idle';
 
 export interface LargestTransfer {
@@ -141,7 +143,75 @@ export interface Incident {
   detection_latency_ms: number | null;
   affected_count: number;
   affected_wallets: number;
-  evidence: { fingerprints?: FingerprintEvidence[]; fingerprinted?: number };
+  evidence: {
+    fingerprints?: FingerprintEvidence[];
+    fingerprinted?: number;
+    /** Set on authority_change incidents: what the upgradeable loader was asked to do. */
+    authority?: AuthorityEvidence;
+    /** Set when the incident began soon after the program was upgraded. */
+    deploy?: DeployEvidence;
+    /** Set on vault_drain incidents. */
+    vault?: VaultEvidence;
+  };
+}
+
+export interface VaultEvidence {
+  account: string;
+  mint: string | null;
+  symbol: string;
+  outflow: number;
+  balance_after: number;
+  pct: number;
+  usd: number | null;
+}
+
+export interface VaultStatus {
+  vaults: {
+    account: string;
+    mint: string | null;
+    symbol: string | null;
+    balance: number | null;
+    balance_usd: number | null;
+    net_window: number;
+    seen: boolean;
+  }[];
+  candidates: { account: string; mint: string | null; symbol: string; transactions: number }[];
+  window_secs: number;
+}
+
+export interface AuthorityEvidence {
+  action: 'upgrade' | 'set_authority' | 'close' | 'extend';
+  program_id: string;
+  programdata: string;
+  authority: string | null;
+  signature: string;
+  slot: number;
+  path: string;
+  buffer?: string | null;
+  new_authority?: string | null;
+  recipient?: string | null;
+  additional_bytes?: number;
+}
+
+export interface DeployEvidence {
+  incident_id: number;
+  signature: string;
+  at: string;
+  slot: number;
+  authority: string | null;
+  seconds_before: number;
+  note: string;
+}
+
+export interface Posture {
+  program_id: string;
+  programdata: string | null;
+  upgradeable: boolean;
+  authority: string | null;
+  authority_kind: 'none' | 'single_key' | 'program_controlled';
+  last_deployed_slot: number | null;
+  code_bytes: number | null;
+  risks: { level: Severity; text: string }[];
 }
 
 export interface StreamHealth {
@@ -184,6 +254,15 @@ export type Condition =
   | { type: 'transfer_usd'; min_usd: number }
   | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity };
 
+export type ChannelType = 'slack' | 'telegram' | 'pagerduty' | 'discord' | 'webhook';
+
+/** Secrets (bot token, routing key, webhook paths) come back masked and are kept when sent back unchanged. */
+export type Channel = (
+  | { type: 'slack' | 'discord' | 'webhook'; url: string }
+  | { type: 'telegram'; bot_token: string; chat_id: string }
+  | { type: 'pagerduty'; routing_key: string }
+) & { min_severity?: Severity | null };
+
 export interface AlertRule {
   id: number;
   name: string;
@@ -192,6 +271,7 @@ export interface AlertRule {
   create_incident: boolean;
   severity: Severity;
   webhook_url: string | null;
+  channels: Channel[];
   enabled: boolean;
   cooldown_secs: number;
   created_at: string;
@@ -206,7 +286,10 @@ export interface AlertExecution {
   fired_at: string;
   message: string;
   incident_id: number | null;
+  /** Secret-free description of where it went. */
   webhook_url: string | null;
+  channel?: ChannelType | null;
+  event?: 'opened' | 'updated' | 'resolved' | 'test' | null;
   delivered: boolean;
   status_code: number | null;
   error: string | null;
@@ -376,4 +459,110 @@ export interface SolamiStatus {
   blur: { enabled: boolean; priced_mints: number; error: string | null };
   mirage: { configured: boolean; active: boolean };
   beam: { lookups: number; carried: number };
+}
+
+// --- Health and summaries ---------------------------------------------------
+
+export interface HealthCheck {
+  id: string;
+  label: string;
+  status: 'pass' | 'warn' | 'fail' | 'unknown';
+  score: number | null;
+  weight: number;
+  /** The rule applied and the numbers behind it. */
+  detail: string;
+}
+
+export interface HealthReport {
+  program_id: string;
+  score: number | null;
+  status: 'healthy' | 'degraded' | 'critical' | 'learning';
+  headline: string;
+  checks: HealthCheck[];
+}
+
+export interface SummaryActivity {
+  tx: number;
+  failed: number;
+  success_rate: number | null;
+  unique_wallets: number;
+  peak_tps: number;
+  peak_at: number | null;
+  fees_sol: number;
+  avg_compute: number | null;
+}
+
+export interface BigMove {
+  signature: string;
+  at: number;
+  amount: number;
+  symbol: string;
+  usd: number | null;
+}
+
+export interface IncidentRef {
+  id: number;
+  kind: IncidentKind;
+  severity: Severity;
+  status: IncidentStatus;
+  title: string;
+  summary: string;
+  detected_at: number;
+  resolved_at: number | null;
+}
+
+export interface HourPoint {
+  hour: number;
+  tx: number;
+  failed: number;
+  usd_volume: number;
+}
+
+export interface Summary {
+  program_id: string;
+  label: string;
+  from: number;
+  to: number;
+  period_secs: number;
+  headline: string;
+  activity: SummaryActivity;
+  previous: SummaryActivity;
+  previous_usd_volume: number;
+  value: { usd_volume: number; sol_volume: number; largest: BigMove[] };
+  top_instructions: { name: string; tx: number; share: number; failure_rate: number }[];
+  top_errors: { label: string; count: number; share: number }[];
+  busiest_hour: HourPoint | null;
+  hourly: HourPoint[];
+  reliability: {
+    opened: number;
+    resolved: number;
+    open_now: number;
+    minutes_in_incident: number;
+    mttd_secs: number | null;
+    mttr_secs: number | null;
+    worst: IncidentRef | null;
+    incidents: IncidentRef[];
+  };
+  program_changes: IncidentRef[];
+  next_actions: string[];
+  coverage: number;
+}
+
+export interface SummarySchedule {
+  id: number;
+  program_id: string;
+  period: 'daily' | 'weekly';
+  hour_utc: number;
+  channels: Channel[];
+  enabled: boolean;
+  created_at: string;
+  last_sent_at: string | null;
+}
+
+export interface ApiToken {
+  id: number;
+  name: string;
+  scope: 'read' | 'write';
+  created_at: string;
+  last_used_at: string | null;
 }

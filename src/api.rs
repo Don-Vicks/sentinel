@@ -1,10 +1,9 @@
 //! HTTP + SSE API consumed by the dashboard.
 
-use crate::alerts::check_webhook_url;
+use crate::alerts::{check_channel, check_webhook_url};
 use crate::auth::{session_token, Account, Viewer};
 use crate::engine::Sentinel;
-use crate::model::{AlertRule, Condition, DetectionConfig, IncidentStatus, Severity};
-use crate::trace;
+use crate::model::{AlertRule, Channel, ChannelKind, Condition, DetectionConfig, IncidentStatus, Severity, SummaryPeriod, SummarySchedule, MASK};
 use axum::extract::{Path, Query, State};
 use axum::http::{header, request::Parts, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -21,7 +20,7 @@ use tokio_stream::wrappers::BroadcastStream;
 
 type AppState = Arc<Sentinel>;
 
-pub struct ApiError(StatusCode, String);
+pub struct ApiError(pub(crate) StatusCode, pub(crate) String);
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -58,15 +57,30 @@ pub fn router(sentinel: AppState) -> Router {
             get(get_program).patch(update_program).delete(remove_program),
         )
         .route("/api/programs/{id}/transactions", get(program_transactions))
+        .route("/api/programs/{id}/posture", get(program_posture))
+        .route("/api/programs/{id}/health", get(program_health))
+        .route("/api/programs/{id}/vaults", get(program_vaults).put(set_program_vaults))
+        .route("/api/programs/{id}/summary", get(program_summary))
         .route("/api/incidents", get(list_incidents))
         .route("/api/incidents/{id}", get(get_incident).patch(update_incident))
         .route("/api/incidents/{id}/timeline", get(incident_timeline))
         .route("/api/transactions/{signature}", get(get_transaction))
+        .route("/api/tokens", get(list_tokens).post(create_token))
+        .route("/api/tokens/{id}", axum::routing::delete(delete_token))
+        .route("/api/incidents/{id}/report", get(incident_report))
+        .route("/api/incidents/{id}/diagnosis", get(incident_diagnosis))
+        .route("/api/summary-schedules", get(list_schedules).post(create_schedule))
+        .route(
+            "/api/summary-schedules/{id}",
+            axum::routing::patch(update_schedule).delete(delete_schedule),
+        )
+        .route("/api/summary-schedules/{id}/send", post(send_schedule))
         .route("/api/rules", get(list_rules).post(create_rule))
         .route("/api/rules/{id}", axum::routing::patch(update_rule).delete(delete_rule))
         .route("/api/rules/{id}/test", post(test_rule))
         .route("/api/alerts", get(list_alerts))
         .route("/api/stream", get(stream))
+        .merge(crate::mcp::router())
         .layer(axum::middleware::from_fn_with_state(sentinel.clone(), crate::limits::rate_limit))
         .with_state(sentinel)
 }
@@ -158,16 +172,20 @@ async fn add_program(
     Account(account): Account,
     Json(body): Json<AddProgram>,
 ) -> ApiResult<Value> {
-    let program_id = body.program_id.trim().to_string();
-    let watching = s.watching(&account);
-    if !s.limits.is_admin(&account) && !watching.contains(&program_id) && watching.len() >= s.limits.max_watched {
+    Ok(Json(add_program_inner(&s, &account, body.program_id, body.label)?))
+}
+
+pub(crate) fn add_program_inner(s: &Sentinel, account: &str, program_id: String, label: Option<String>) -> Result<Value, ApiError> {
+    let program_id = program_id.trim().to_string();
+    let watching = s.watching(account);
+    if !s.limits.is_admin(account) && !watching.contains(&program_id) && watching.len() >= s.limits.max_watched {
         return Err(forbidden(&format!(
             "Your watchlist is full ({} programs). Remove one first.",
             s.limits.max_watched
         )));
     }
-    let p = s.watch(&account, program_id, body.label)?;
-    Ok(Json(json!(p)))
+    let p = s.watch(account, program_id, label)?;
+    Ok(json!(p))
 }
 
 #[derive(Deserialize)]
@@ -250,6 +268,96 @@ async fn program_transactions(
     ))))
 }
 
+async fn program_posture(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    let posture = s
+        .posture(&id)
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, crate::redact::scrub(&e.to_string())))?;
+    Ok(Json(json!(posture)))
+}
+
+async fn program_health(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    // Reads the upgrade authority too when it can; the check is left out of the score if not.
+    let _ = s.posture(&id).await;
+    let health = s.health(&id).ok_or_else(|| not_found("program"))?;
+    Ok(Json(json!(health)))
+}
+
+async fn program_vaults(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(s.vault_status(&id).ok_or_else(|| not_found("program"))?))
+}
+
+#[derive(Deserialize)]
+struct VaultsInput {
+    vaults: Vec<String>,
+}
+
+/// Vaults are part of the program's shared detection settings, so anyone watching it may edit them.
+async fn set_program_vaults(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Path(id): Path<String>,
+    Json(body): Json<VaultsInput>,
+) -> ApiResult<Value> {
+    Ok(Json(set_vaults_inner(&s, &account, &id, &body.vaults)?))
+}
+
+pub(crate) fn set_vaults_inner(s: &Sentinel, account: &str, id: &str, requested: &[String]) -> Result<Value, ApiError> {
+    if !s.is_watching(account, id) {
+        return Err(forbidden("Watch the program to set its vaults"));
+    }
+    if requested.len() > 10 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "At most 10 vaults per program".into()));
+    }
+    let mut vaults = Vec::new();
+    for v in requested {
+        let v = v.trim();
+        if v.parse::<solana_sdk::pubkey::Pubkey>().is_err() {
+            return Err(ApiError(StatusCode::BAD_REQUEST, format!("{v} is not a valid account address")));
+        }
+        if !vaults.iter().any(|x| x == v) {
+            vaults.push(v.to_string());
+        }
+    }
+    s.set_vaults(id, vaults)?;
+    s.vault_status(id).ok_or_else(|| not_found("program"))
+}
+
+#[derive(Deserialize)]
+struct SummaryQuery {
+    /// `1h`, `24h`, `7d`, `30d`, or any number of hours/days like `12h`.
+    period: Option<String>,
+}
+
+/// "24h" -> 86400. Defaults to a day.
+pub fn parse_period(text: Option<&str>) -> Option<i64> {
+    let text = text.map(str::trim).filter(|t| !t.is_empty()).unwrap_or("24h");
+    let (digits, unit) = text.split_at(text.find(|c: char| !c.is_ascii_digit())?);
+    let n: i64 = digits.parse().ok().filter(|n| *n > 0)?;
+    let secs = match unit {
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => return None,
+    };
+    (3600..=30 * 86_400).contains(&secs).then_some(secs)
+}
+
+async fn program_summary(State(s): State<AppState>, Path(id): Path<String>, Query(q): Query<SummaryQuery>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    let period = parse_period(q.period.as_deref())
+        .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "period must be 1h to 30d, like 24h or 7d".into()))?;
+    let _ = s.posture(&id).await;
+    Ok(Json(json!(s.summary(&id, period)?)))
+}
+
 #[derive(Deserialize)]
 struct IncidentQuery {
     program: Option<String>,
@@ -297,7 +405,7 @@ async fn update_incident(
 }
 
 async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> ApiResult<Value> {
-    let tx = s.transaction(&sig).await?.ok_or_else(|| {
+    let found = s.explain_transaction(&sig).await?.ok_or_else(|| {
         ApiError(
             StatusCode::NOT_FOUND,
             "Transaction not found. It isn't in Sentinel's live window or an incident, and the \
@@ -305,24 +413,7 @@ async fn get_transaction(State(s): State<AppState>, Path(sig): Path<String>) -> 
                 .into(),
         )
     })?;
-    let labels = s.program_labels();
-    let (mut trace, landing, tip) = tokio::join!(
-        trace::build(&tx, &labels, s.rpc.as_deref(), &s.owners, &s.prices, Some(&s.idls)),
-        s.beam.landing(&sig),
-        s.beam.tip_in(&tx),
-    );
-    if let Some(line) = crate::beam::describe(landing.as_ref(), tip.as_ref()) {
-        trace.narrative.push(line);
-    }
-    let programs: Vec<&String> = labels.keys().filter(|p| tx.touches(p)).collect();
-    Ok(Json(json!({
-        "transaction": tx,
-        "trace": trace,
-        "beam": { "landing": landing, "tip": tip },
-        "monitored_programs": programs,
-        "program_labels": labels,
-        "incidents": s.store.incidents_for_transaction(&sig)?,
-    })))
+    Ok(Json(found))
 }
 
 async fn list_rules(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
@@ -331,6 +422,7 @@ async fn list_rules(State(s): State<AppState>, Account(account): Account) -> Api
         .rules()?
         .into_iter()
         .filter(|r| r.owner.as_deref() == Some(account.as_str()))
+        .map(|r| r.masked())
         .collect();
     Ok(Json(json!(mine)))
 }
@@ -349,7 +441,7 @@ fn owned_rule(s: &Sentinel, account: &str, id: i64) -> Result<AlertRule, ApiErro
 }
 
 #[derive(Deserialize)]
-struct RuleInput {
+pub(crate) struct RuleInput {
     name: String,
     program_id: Option<String>,
     condition: Condition,
@@ -358,6 +450,8 @@ struct RuleInput {
     #[serde(default = "medium")]
     severity: Severity,
     webhook_url: Option<String>,
+    #[serde(default)]
+    channels: Vec<Channel>,
     #[serde(default = "yes")]
     enabled: bool,
     #[serde(default = "default_cooldown")]
@@ -383,20 +477,72 @@ async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), 
             return Err(forbidden("Rules can only target programs on your watchlist"));
         }
     }
-    if let Some(url) = input.webhook_url.as_deref().filter(|u| !u.is_empty()) {
+    if input.channels.len() > MAX_CHANNELS {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("A rule can have at most {MAX_CHANNELS} channels")));
+    }
+    if let Some(url) = input.webhook_url.as_deref().filter(|u| !u.is_empty() && !u.contains(MASK)) {
         check_webhook_url(url, s.allow_private_webhooks())
             .await
             .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
     }
+    for channel in input.channels.iter().filter(|c| !c.is_masked()) {
+        check_channel(channel, s.allow_private_webhooks())
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{}: {e}", channel.label())))?;
+    }
     Ok(())
 }
 
+const MAX_CHANNELS: usize = 5;
+
+/// Channels from a request, with masked secrets filled in from the rule they replace.
+fn resolve_channels(input: &RuleInput, existing: Option<&AlertRule>) -> Result<Vec<Channel>, ApiError> {
+    restore_channels(&input.channels, existing.map(|r| r.channels.as_slice()).unwrap_or_default())
+}
+
+fn restore_channels(channels: &[Channel], old: &[Channel]) -> Result<Vec<Channel>, ApiError> {
+    channels
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut c = c.clone();
+            let kept = old.get(i).is_some_and(|o| c.restore_secret(o));
+            if c.is_masked() && !kept {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    format!("{} secret is masked; enter it again", c.label()),
+                ));
+            }
+            Ok(c)
+        })
+        .collect()
+}
+
+/// A legacy URL, unless the client sent a masked copy of the stored one.
+fn resolve_webhook(input: &RuleInput, existing: Option<&AlertRule>) -> Option<String> {
+    if !input.channels.is_empty() {
+        return None;
+    }
+    let url = input.webhook_url.clone().filter(|u| !u.is_empty())?;
+    if url.contains(MASK) {
+        return existing.and_then(|r| r.webhook_url.clone());
+    }
+    Some(url)
+}
+
 async fn create_rule(State(s): State<AppState>, Account(account): Account, Json(input): Json<RuleInput>) -> ApiResult<Value> {
+    Ok(Json(create_rule_inner(&s, account, input).await?))
+}
+
+/// Shared by the REST API and the MCP server so both enforce the same limits and checks.
+pub(crate) async fn create_rule_inner(s: &Sentinel, account: String, input: RuleInput) -> Result<Value, ApiError> {
     let owned = s.store.rules()?.iter().filter(|r| r.owner.as_deref() == Some(account.as_str())).count();
     if !s.limits.is_admin(&account) && owned >= s.limits.max_rules {
         return Err(forbidden(&format!("You have the maximum of {} rules. Delete one first.", s.limits.max_rules)));
     }
-    validate(&s, &account, &input).await?;
+    validate(s, &account, &input).await?;
+    let channels = resolve_channels(&input, None)?;
+    let webhook_url = resolve_webhook(&input, None);
     let rule = s.store.create_rule(AlertRule {
         id: 0,
         owner: Some(account),
@@ -405,14 +551,15 @@ async fn create_rule(State(s): State<AppState>, Account(account): Account, Json(
         condition: input.condition,
         create_incident: input.create_incident,
         severity: input.severity,
-        webhook_url: input.webhook_url.filter(|u| !u.is_empty()),
+        webhook_url,
+        channels,
         enabled: input.enabled,
         cooldown_secs: input.cooldown_secs,
         created_at: Utc::now(),
         last_fired_at: None,
     })?;
     s.reload_rules()?;
-    Ok(Json(json!(rule)))
+    Ok(json!(rule.masked()))
 }
 
 async fn update_rule(
@@ -423,20 +570,188 @@ async fn update_rule(
 ) -> ApiResult<Value> {
     let existing = owned_rule(&s, &account, id)?;
     validate(&s, &account, &input).await?;
+    let channels = resolve_channels(&input, Some(&existing))?;
+    let webhook_url = resolve_webhook(&input, Some(&existing));
     let rule = AlertRule {
         name: input.name.trim().to_string(),
         program_id: input.program_id.filter(|p| !p.is_empty()),
         condition: input.condition,
         create_incident: input.create_incident,
         severity: input.severity,
-        webhook_url: input.webhook_url.filter(|u| !u.is_empty()),
+        webhook_url,
+        channels,
         enabled: input.enabled,
         cooldown_secs: input.cooldown_secs,
         ..existing
     };
     s.store.update_rule(&rule)?;
     s.reload_rules()?;
-    Ok(Json(json!(rule)))
+    Ok(Json(json!(rule.masked())))
+}
+
+// ------------------------------------------------------------ API tokens
+
+/// Agent tokens one account can have.
+const MAX_TOKENS: usize = 10;
+
+#[derive(Deserialize)]
+struct TokenInput {
+    name: String,
+    /// "read" (the default) or "write".
+    scope: Option<String>,
+}
+
+async fn list_tokens(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
+    Ok(Json(json!(s.store.api_tokens(&account)?)))
+}
+
+/// Creates a token for agents (the MCP server). The secret is shown once, here.
+async fn create_token(State(s): State<AppState>, Account(account): Account, Json(input): Json<TokenInput>) -> ApiResult<Value> {
+    let name = input.name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Name the token (up to 60 characters)".into()));
+    }
+    let scope = input.scope.as_deref().unwrap_or("read");
+    if !matches!(scope, "read" | "write") {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "scope must be \"read\" or \"write\"".into()));
+    }
+    if s.store.api_tokens(&account)?.len() >= MAX_TOKENS {
+        return Err(forbidden(&format!("You have the maximum of {MAX_TOKENS} tokens. Revoke one first.")));
+    }
+    let (record, secret) = s.auth.create_api_token(&account, name, scope)?;
+    Ok(Json(json!({ "token": record, "secret": secret })))
+}
+
+async fn delete_token(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    if !s.store.delete_api_token(&account, id)? {
+        return Err(not_found("token"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// A post-mortem for the incident, as markdown.
+async fn incident_report(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Response, ApiError> {
+    let markdown = s.incident_report(id)?.ok_or_else(|| not_found("incident"))?;
+    Ok(([(header::CONTENT_TYPE, "text/markdown; charset=utf-8")], markdown).into_response())
+}
+
+async fn incident_diagnosis(State(s): State<AppState>, Path(id): Path<i64>) -> ApiResult<Value> {
+    Ok(Json(json!(s.diagnose_incident(id)?.ok_or_else(|| not_found("incident"))?)))
+}
+
+// ------------------------------------------------------------ summary schedules
+
+/// Scheduled reports one account can have.
+const MAX_SCHEDULES: usize = 10;
+
+#[derive(Deserialize)]
+struct ScheduleInput {
+    program_id: String,
+    period: SummaryPeriod,
+    #[serde(default = "nine")]
+    hour_utc: u8,
+    channels: Vec<Channel>,
+    #[serde(default = "yes")]
+    enabled: bool,
+}
+
+fn nine() -> u8 {
+    9
+}
+
+async fn validate_schedule(s: &Sentinel, account: &str, input: &ScheduleInput) -> Result<(), ApiError> {
+    if !s.is_watching(account, &input.program_id) {
+        return Err(forbidden("Summaries can only be scheduled for programs on your watchlist"));
+    }
+    if input.hour_utc > 23 {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "hour_utc must be 0 to 23".into()));
+    }
+    if input.channels.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Add at least one channel to send the summary to".into()));
+    }
+    if input.channels.len() > MAX_CHANNELS {
+        return Err(ApiError(StatusCode::BAD_REQUEST, format!("A summary can have at most {MAX_CHANNELS} channels")));
+    }
+    if input.channels.iter().any(|c| matches!(c.kind, ChannelKind::Pagerduty { .. })) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "PagerDuty is for pages; send summaries to Slack, Telegram, Discord or a webhook".into()));
+    }
+    for channel in input.channels.iter().filter(|c| !c.is_masked()) {
+        check_channel(channel, s.allow_private_webhooks())
+            .await
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{}: {e}", channel.label())))?;
+    }
+    Ok(())
+}
+
+fn owned_schedule(s: &Sentinel, account: &str, id: i64) -> Result<SummarySchedule, ApiError> {
+    s.store
+        .schedules()?
+        .into_iter()
+        .find(|x| x.id == id && x.owner == account)
+        .ok_or_else(|| not_found("summary schedule"))
+}
+
+async fn list_schedules(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
+    let mine: Vec<SummarySchedule> = s.store.schedules()?.into_iter().filter(|x| x.owner == account).map(|x| x.masked()).collect();
+    Ok(Json(json!(mine)))
+}
+
+async fn create_schedule(State(s): State<AppState>, Account(account): Account, Json(input): Json<ScheduleInput>) -> ApiResult<Value> {
+    let owned = s.store.schedules()?.iter().filter(|x| x.owner == account).count();
+    if !s.limits.is_admin(&account) && owned >= MAX_SCHEDULES {
+        return Err(forbidden(&format!("You have the maximum of {MAX_SCHEDULES} scheduled summaries. Delete one first.")));
+    }
+    validate_schedule(&s, &account, &input).await?;
+    let channels = restore_channels(&input.channels, &[])?;
+    let schedule = s.store.create_schedule(SummarySchedule {
+        id: 0,
+        owner: account,
+        program_id: input.program_id,
+        period: input.period,
+        hour_utc: input.hour_utc,
+        channels,
+        enabled: input.enabled,
+        created_at: Utc::now(),
+        last_sent_at: None,
+    })?;
+    Ok(Json(json!(schedule.masked())))
+}
+
+async fn update_schedule(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Path(id): Path<i64>,
+    Json(input): Json<ScheduleInput>,
+) -> ApiResult<Value> {
+    let existing = owned_schedule(&s, &account, id)?;
+    validate_schedule(&s, &account, &input).await?;
+    let channels = restore_channels(&input.channels, &existing.channels)?;
+    let schedule = SummarySchedule {
+        program_id: input.program_id,
+        period: input.period,
+        hour_utc: input.hour_utc,
+        channels,
+        enabled: input.enabled,
+        ..existing
+    };
+    s.store.update_schedule(&schedule)?;
+    Ok(Json(json!(schedule.masked())))
+}
+
+async fn delete_schedule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    owned_schedule(&s, &account, id)?;
+    s.store.delete_schedule(id)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Sends the report now without waiting for its hour.
+async fn send_schedule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    let schedule = owned_schedule(&s, &account, id)?;
+    if !s.is_monitored(&schedule.program_id) {
+        return Err(not_found("program"));
+    }
+    s.send_summary(&schedule)?;
+    Ok(Json(json!({ "queued": true })))
 }
 
 async fn delete_rule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
@@ -448,8 +763,8 @@ async fn delete_rule(State(s): State<AppState>, Account(account): Account, Path(
 
 async fn test_rule(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
     let rule = owned_rule(&s, &account, id)?;
-    if rule.webhook_url.is_none() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "Rule has no webhook URL".into()));
+    if !rule.has_targets() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Rule has no channel to deliver to".into()));
     }
     s.test_rule(rule);
     Ok(Json(json!({ "queued": true })))

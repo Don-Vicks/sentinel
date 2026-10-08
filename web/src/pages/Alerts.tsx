@@ -9,6 +9,8 @@ import { RequireAccount } from '../components/SignIn';
 import type { AlertExecution, AlertRule, Condition, Metric, Severity } from '../lib/types';
 import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../components/ui';
+import { AgentAccess } from '../components/AgentAccess';
+import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
 type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident';
 
@@ -73,7 +75,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [minSeverity, setMinSeverity] = useState<Severity>('medium');
   const [severity, setSeverity] = useState<Severity>('high');
   const [createIncident, setCreateIncident] = useState(true);
-  const [webhook, setWebhook] = useState('');
+  const [channels, setChannels] = useState<ChannelDraft[]>([]);
   const [cooldown, setCooldown] = useState('300');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -103,6 +105,11 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Enter a threshold greater than zero.');
       return;
     }
+    const problem = channels.map(draftProblem).find(Boolean);
+    if (problem) {
+      setError(problem);
+      return;
+    }
     setBusy(true);
     try {
       await send('POST', '/api/rules', {
@@ -111,10 +118,11 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         condition: condition(),
         create_incident: template === 'incident' ? false : createIncident,
         severity,
-        webhook_url: webhook.trim() || null,
+        channels: channels.map(draftToChannel),
         cooldown_secs: Number(cooldown) || 0,
       });
       setName('');
+      setChannels([]);
       onCreated();
     } catch (err) {
       setError((err as Error).message);
@@ -209,9 +217,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
 
       <fieldset className="grid gap-3 md:grid-cols-[2fr_1fr_1fr] md:items-end">
         <legend className="label">Then</legend>
-        <div>
-          <label className="label" htmlFor="rule-webhook">Webhook URL (Discord, Slack or any HTTPS endpoint)</label>
-          <input id="rule-webhook" className="input font-mono" type="url" inputMode="url" value={webhook} onChange={(e) => setWebhook(e.target.value)} placeholder="https://discord.com/api/webhooks/…" autoComplete="off" />
+        <div className="md:col-span-1">
+          <p className="label">Notify</p>
+          <p className="text-xs text-ink-3">Slack, Telegram, PagerDuty, Discord or a webhook. Alerts follow the incident: a message when it opens, replies when it escalates and when it resolves.</p>
         </div>
         <div>
           <label className="label" htmlFor="rule-severity">Severity</label>
@@ -222,6 +230,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         <div>
           <label className="label" htmlFor="rule-cooldown">Cooldown (s)</label>
           <input id="rule-cooldown" className="input num" type="number" min="0" value={cooldown} onChange={(e) => setCooldown(e.target.value)} />
+        </div>
+        <div className="md:col-span-3">
+          <ChannelEditor value={channels} onChange={setChannels} />
         </div>
         {template !== 'incident' && (
           <label className="flex items-center gap-2 text-sm text-ink-2 md:col-span-3">
@@ -246,7 +257,7 @@ export function Alerts() {
     <div className="space-y-6">
       <PageHeader
         title="Alerts"
-        meta="Rules run against the live stream every second and deliver to your webhook."
+        meta="Rules run against the live stream every second and notify Slack, Telegram, PagerDuty, Discord or your webhook, following each incident from open to resolved."
       />
       <RequireAccount what="create alerts">
         <AlertsBody />
@@ -314,13 +325,23 @@ function AlertsBody() {
                     <td className="font-medium">{r.name}</td>
                     <td className="text-ink-2">{label(r.program_id)}</td>
                     <td className="text-ink-2 text-xs">{describe(r.condition)}{r.create_incident && r.condition.type !== 'incident' ? ' → incident' : ''}</td>
-                    <td className="font-mono text-xs text-ink-2 max-w-48 truncate">{r.webhook_url ? new URL(r.webhook_url).host : '—'}</td>
+                    <td className="text-xs text-ink-2">
+                      {deliversTo(r).length ? (
+                        <span className="flex flex-wrap gap-x-2 gap-y-0.5">
+                          {deliversTo(r).map((d, i) => (
+                            <span key={i} title={d.min ? `severity ≥ ${d.min}` : undefined}>{d.label}{d.min ? ` ≥ ${d.min}` : ''}</span>
+                          ))}
+                        </span>
+                      ) : (
+                        '—'
+                      )}
+                    </td>
                     <td className="text-xs text-ink-3 num">{ago(r.last_fired_at)}</td>
                     <td className="whitespace-nowrap text-right">
                       <button className="btn h-8 text-xs mr-1" onClick={() => toggle(r)} aria-pressed={r.enabled}>
                         {r.enabled ? 'Disable' : 'Enable'}
                       </button>
-                      {r.webhook_url && (
+                      {deliversTo(r).length > 0 && (
                         <button className="btn h-8 text-xs mr-1" onClick={() => test(r)} disabled={testing === r.id}>
                           {testing === r.id ? <Spinner /> : <Send className="size-3.5" aria-hidden />} Test
                         </button>
@@ -337,22 +358,28 @@ function AlertsBody() {
         )}
       </Panel>
 
+      <AgentAccess />
+
       <Panel title="Deliveries">
         {executions.loading && !executions.data ? (
           <div className="p-4"><Skeleton className="h-16" /></div>
         ) : !executions.data?.length ? (
-          <Empty title="Nothing delivered yet">Each webhook call shows up here live, with its HTTP status and latency.</Empty>
+          <Empty title="Nothing delivered yet">Each delivery shows up here live, with its channel, HTTP status and latency.</Empty>
         ) : (
           <div className="overflow-x-auto">
             <table className="table">
               <thead>
-                <tr><th>Time</th><th>Rule</th><th>Message</th><th>Result</th><th className="text-right">Latency</th><th>Incident</th></tr>
+                <tr><th>Time</th><th>Rule</th><th>Channel</th><th>Message</th><th>Result</th><th className="text-right">Latency</th><th>Incident</th></tr>
               </thead>
               <tbody>
                 {executions.data.map((x) => (
                   <tr key={x.id}>
                     <td className="num text-xs text-ink-2 whitespace-nowrap">{clock(x.fired_at)}</td>
                     <td className="font-medium whitespace-nowrap">{x.rule_name}</td>
+                    <td className="text-xs whitespace-nowrap text-ink-2">
+                      {x.channel ? CHANNELS[x.channel].label : '—'}
+                      {x.event && x.event !== 'opened' && <span className="text-ink-3"> · {x.event}</span>}
+                    </td>
                     <td className="text-ink-2 text-xs max-w-md truncate" title={x.message}>{x.message}</td>
                     <td className="whitespace-nowrap text-xs">
                       {x.delivered ? (

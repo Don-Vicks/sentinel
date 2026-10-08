@@ -57,6 +57,19 @@ flowchart TD
 - **Accounts: Sign-In With Solana.** Your wallet signs a one-time message (domain, nonce, 5-minute expiry). There are no passwords and nothing goes on chain. Each wallet has its own watchlist, alert rules, webhooks and delivery log; a rule only fires for programs its owner watches. Streaming and detection are shared per program, so everyone watching Pump.fun sees the same incidents. Browsing is public and read-only; watching programs and managing alerts need a signed-in wallet.
 - **Stream health.** The dashboard shows ingest tx/s, current slot, tip lag in slots, time since the last transaction, and events dropped.
 
+## Watch the program, not only its traffic
+
+Failure rates and volume say how a program is behaving. These say what is being done *to* it, and tell the right people:
+
+- **Alerts follow the incident, in Slack, Telegram, PagerDuty, Discord or a webhook.** A rule can notify several channels, each with its own minimum severity (page on critical, chat on medium). The first message says what broke: the top failing `program::instruction → error`, wallets affected, how fast it was detected. An escalation and the resolution reply to that message in Telegram, and PagerDuty triggers and resolves one alert per incident, so nobody is paged twice and nothing is left open. Bot tokens and routing keys are stored server-side, masked in the API and scrubbed from error text.
+- **Program upgrades and authority changes.** Sentinel reads the upgradeable loader's instructions, including ones a multisig executes through CPI, and opens an incident when a watched program is upgraded, its upgrade authority moves, it is made immutable or it is closed. The program page shows who can upgrade it now: a single wallet (flagged), a program-controlled authority such as a multisig, or nobody.
+- **Deploy correlation.** An incident that starts within 30 minutes of an upgrade carries it as evidence: "this began 74s after the program was upgraded", in the explanation, the alert and the post-mortem.
+- **Vault drains.** Name a program's treasury or vault accounts (Sentinel suggests likely ones from traffic) and it opens an incident when one loses a set share of its balance, or a set dollar amount, within ten minutes. Deposits offset withdrawals, so ordinary churn is not an incident.
+- **Health check.** A 0-100 score from separate checks (failure rate against its baseline, open incidents, transactions arriving, compute, funds, decoding coverage, upgrade authority). Each states the rule it applied and the numbers it saw, and a check with nothing to judge says so instead of passing.
+- **Daily and weekly summaries.** What the program did: transactions and trend, success rate, unique wallets, value moved, largest transfers, top instructions and errors, incidents with time to detect and resolve, program changes, and what is worth doing next. Built from stored hourly rollups, so it survives restarts. Read it on the dashboard or schedule it to any chat channel.
+- **Post-mortems and diagnosis.** Any incident exports a markdown post-mortem, and a deterministic diagnosis names the likely cause, how confident that is and why, similar earlier incidents, and next steps. It is built only from recorded data.
+- **An MCP server** so an agent can use all of this. See [docs/MCP.md](docs/MCP.md).
+
 ## Built on Vortex
 
 Vortex is not a third-party dependency. It is [my own open-source Rust project](https://github.com/Don-Vicks/vortex), the same author and the same GitHub account. I started it in June as a transaction execution stack: Jito bundles, a tip engine and failure recovery. Its Yellowstone client was already there, and Sentinel's needs went well past it, so I extended Vortex and kept it as the ingest library. Keeping the two apart means Sentinel has no stream-ingest code of its own, which is the point of the audit in [`docs/VORTEX_AUDIT.md`](docs/VORTEX_AUDIT.md). Its Blur, RPC and Beam calls are in this repo.
@@ -180,8 +193,17 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SENTINEL_MAX_RULES` | `25` | Alert rules one wallet can own |
 | `SENTINEL_AUTH_PER_MIN` / `SENTINEL_WRITES_PER_MIN` | `20` / `60` | Per-IP limits on sign-in requests and on everything that writes |
 | `SENTINEL_TRUST_PROXY` | — | `1` to take the client IP from `X-Forwarded-For` (behind a reverse proxy) |
+| `SENTINEL_MCP_PER_MIN` / `SENTINEL_MCP_WRITES_PER_MIN` | `120` / `20` | Per-token limits on MCP calls, and on the ones that change things |
+| `SENTINEL_TELEGRAM_API` / `SENTINEL_PAGERDUTY_API` | official endpoints | Override where Telegram and PagerDuty deliveries go (tests and mocks) |
 | `SENTINEL_ALLOW_PRIVATE_WEBHOOKS` | — | `1` allows webhooks to private and loopback addresses (local dev only; blocked by default) |
 | `SENTINEL_SIMULATE` | — | **Dev only.** Program ID to feed with synthetic traffic instead of gRPC |
+
+### Seed a demo database
+
+```bash
+cargo run --example seed_demo -- demo.db      # a day of rollups, an upgrade and the failures it caused, a vault outflow
+SENTINEL_DB=demo.db SENTINEL_PROGRAMS=6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P cargo run
+```
 
 ### Frontend development
 

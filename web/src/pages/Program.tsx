@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router';
-import { ArrowRight, Pause, Play, Star } from 'lucide-react';
+import { ArrowRight, FileText, Pause, Play, Star } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
@@ -11,6 +11,9 @@ import { ActivityChart, LineChart, ShareBar, Sparkline } from '../components/cha
 import { Address, Empty, ErrorState, HealthDot, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, ShowMore, Stat } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
+import { PostureCard } from '../components/PostureCard';
+import { HealthCard } from '../components/HealthCard';
+import { FundsCard } from '../components/FundsCard';
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
@@ -202,6 +205,10 @@ export function Program() {
           </span>
         }
         actions={
+          <>
+          <Link to={`/programs/${id}/summary`} className="btn">
+            <FileText className="size-4" aria-hidden /> Summary
+          </Link>
           <button
             className={isWatching ? 'btn' : 'btn-primary'}
             onClick={toggleWatch}
@@ -212,6 +219,7 @@ export function Program() {
             <Star className={`size-4 ${isWatching ? 'fill-current text-accent' : ''}`} aria-hidden />
             {isWatching ? 'Watching' : 'Watch'}
           </button>
+          </>
         }
       />
 
@@ -275,6 +283,12 @@ export function Program() {
           </div>
         </Panel>
       </div>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <HealthCard programId={id} />
+        <PostureCard programId={id} incidents={data.incidents} />
+      </div>
+      <FundsCard programId={id} />
 
       <Panel title="Instructions (last 5 min)">
         {s.instructions.length === 0 ? (

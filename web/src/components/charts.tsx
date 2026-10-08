@@ -448,3 +448,30 @@ export function ShareBar({ share, tone = 'fail' }: { share: number; tone?: 'fail
     </div>
   );
 }
+
+/** Transactions per hour as bars, with the failed share in red. Hover for the numbers. */
+export function HourlyBars({ points }: { points: { hour: number; tx: number; failed: number }[] }) {
+  if (points.length === 0) return null;
+  const max = Math.max(1, ...points.map((p) => p.tx));
+  const W = 100;
+  const H = 40;
+  const slot = W / points.length;
+  const bar = Math.min(slot * 0.7, 6);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="block w-full h-56" role="img" aria-label="Transactions per hour">
+      {points.map((p, i) => {
+        const h = (p.tx / max) * (H - 2);
+        const f = (p.failed / max) * (H - 2);
+        const x = i * slot + (slot - bar) / 2;
+        const when = new Date(p.hour * 1000).toISOString().slice(5, 16).replace('T', ' ');
+        return (
+          <g key={p.hour}>
+            <title>{`${when} UTC: ${p.tx.toLocaleString()} tx, ${p.failed.toLocaleString()} failed`}</title>
+            <rect x={x} y={H - h} width={bar} height={Math.max(h, 0.4)} fill="var(--color-series-1)" opacity={0.85} />
+            {f > 0 && <rect x={x} y={H - f} width={bar} height={Math.max(f, 0.4)} fill="var(--color-series-fail)" />}
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
