@@ -292,7 +292,7 @@ export function Tabs<T extends string>({
             aria-controls={`panel-${t.value}`}
             onClick={() => onChange(t.value)}
             className={`-mb-px inline-flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-3 text-sm ${
-              on ? 'border-ink font-medium text-ink' : 'border-transparent text-ink-2 hover:text-ink'
+              on ? 'border-brand font-medium text-ink' : 'border-transparent text-ink-2 hover:text-ink'
             }`}
           >
             {t.label}

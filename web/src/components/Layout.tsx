@@ -1,7 +1,7 @@
 import { getCluster } from '../lib/format';
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router';
-import { Bell, LayoutGrid, Search, Siren, Star } from 'lucide-react';
+import { Bell, LayoutGrid, Moon, Search, Siren, Star, Sun } from 'lucide-react';
 import { usePrograms } from '../lib/programs';
 import { useLiveStatus } from '../lib/live';
 import { HealthDot } from './ui';
@@ -14,18 +14,24 @@ import { parseQuery } from '../lib/query';
 export function Mark({ className = 'size-7' }: { className?: string }) {
   return (
     <svg viewBox="0 0 28 28" className={className} aria-hidden>
-      <rect width="28" height="28" rx="7" fill="var(--color-ink)" />
-      <circle cx="14" cy="14" r="8.5" fill="none" stroke="var(--color-canvas)" strokeOpacity="0.35" strokeWidth="1.5" />
-      <circle cx="14" cy="14" r="4" fill="none" stroke="var(--color-canvas)" strokeOpacity="0.35" strokeWidth="1.5" />
-      <path d="M14 14 L20.5 8.5" stroke="var(--color-canvas)" strokeWidth="2" strokeLinecap="round" />
-      <circle cx="18.6" cy="17.4" r="2" fill="var(--color-series-fail)" />
+      <defs>
+        <linearGradient id="mark-bg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stopColor="var(--color-brand-2)" />
+          <stop offset="1" stopColor="#6c4fe0" />
+        </linearGradient>
+      </defs>
+      <rect width="28" height="28" rx="7" fill="url(#mark-bg)" />
+      <circle cx="14" cy="14" r="8.5" fill="none" stroke="#fff" strokeOpacity="0.35" strokeWidth="1.5" />
+      <circle cx="14" cy="14" r="4" fill="none" stroke="#fff" strokeOpacity="0.35" strokeWidth="1.5" />
+      <path d="M14 14 L20.5 8.5" stroke="#fff" strokeWidth="2" strokeLinecap="round" />
+      <circle cx="18.6" cy="17.4" r="2" fill="#fff" />
     </svg>
   );
 }
 
 const navCls = ({ isActive }: { isActive: boolean }) =>
   `flex items-center gap-2 rounded-md px-2.5 h-9 text-sm ${
-    isActive ? 'bg-sunken text-ink font-medium' : 'text-ink-2 hover:text-ink hover:bg-sunken'
+    isActive ? 'bg-accent-soft text-ink font-medium shadow-[inset_2px_0_0_var(--color-brand)]' : 'text-ink-2 hover:text-ink hover:bg-sunken'
   }`;
 
 function useClock() {
@@ -38,7 +44,7 @@ function useClock() {
 }
 
 /** Always-visible live state of the Vortex stream. */
-function StatusBar() {
+function StatusBar({ theme, toggle }: { theme: 'dark' | 'light'; toggle: () => void }) {
   const { stream, programs } = usePrograms();
   const sse = useLiveStatus();
   const now = useClock();
@@ -110,6 +116,9 @@ function StatusBar() {
           <Siren className="size-3.5" aria-hidden />
           {openIncidents ? `${openIncidents} open` : 'None open'}
         </Link>
+        <button className="text-ink-3 hover:text-ink" onClick={toggle} aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'} title="Theme">
+          {theme === 'dark' ? <Sun className="size-4" aria-hidden /> : <Moon className="size-4" aria-hidden />}
+        </button>
         <span className="hidden sm:inline whitespace-nowrap num text-ink-3" title="UTC">
           {now.toISOString().slice(11, 19)} UTC
         </span>
@@ -160,7 +169,23 @@ function TxSearch() {
   );
 }
 
+function useTheme() {
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => (document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'));
+  const toggle = () => {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem('sentinel-theme', next);
+    } catch {
+      /* the choice just won't persist */
+    }
+    setTheme(next);
+  };
+  return { theme, toggle };
+}
+
 export function Layout() {
+  const { theme, toggle } = useTheme();
   const { programs } = usePrograms();
   const { watching } = useAuth();
   const mine = new Set(watching);
@@ -222,7 +247,7 @@ export function Layout() {
         </div>
       </aside>
       <div className="min-w-0">
-        <StatusBar />
+        <StatusBar theme={theme} toggle={toggle} />
         <main className="min-w-0 px-4 py-6 lg:px-8 max-w-[1440px]">
           <Outlet />
         </main>

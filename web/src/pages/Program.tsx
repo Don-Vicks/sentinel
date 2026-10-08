@@ -315,7 +315,7 @@ export function Program() {
         <HealthCard programId={id} />
         {data.incidents.some((i) => i.status === 'resolved') && (
           <Panel title="Incident history" action={<Link to={`/incidents?program=${id}`} className="link text-xs">All</Link>}>
-            <IncidentList incidents={data.incidents.filter((i) => i.status === 'resolved').slice(0, 8)} showProgram={false} />
+            <IncidentList incidents={data.incidents.filter((i) => i.status === 'resolved').slice(0, 8)} showProgram={false} counts={false} />
           </Panel>
         )}
         </div>

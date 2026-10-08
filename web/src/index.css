@@ -1,67 +1,77 @@
 @import "tailwindcss";
 
-/* Design tokens. Components use these via Tailwind (bg-surface, text-ink-2, …). */
+/* Design tokens. Components use these via Tailwind (bg-surface, text-ink-2, …).
+   Dark is the default: a purple-tinted night palette (issue-stream density in the manner of
+   Sentry) with an orange brand accent (the manner of Helius). Light is opt-in via the toggle. */
 @theme {
-  --color-canvas: #f6f6f4;
-  --color-surface: #fcfcfb;
-  --color-sunken: #f0efec;
-  --color-line: #e3e2dd;
-  --color-line-strong: #cfcdc6;
-  --color-ink: #111110;
-  --color-ink-2: #52514e;
-  --color-ink-3: #6f6e69;
-  --color-accent: #2a78d6;
-  --color-accent-soft: #e6effb;
+  --color-canvas: #120e1b;
+  --color-surface: #1a1425;
+  --color-sunken: #231b32;
+  --color-line: #2f2642;
+  --color-line-strong: #43375c;
+  --color-ink: #f4f1fa;
+  --color-ink-2: #c6bfd8;
+  --color-ink-3: #9a91b0;
+  --color-accent: #9d8cff;
+  --color-accent-soft: #2a2250;
+  --color-brand: #ff6b35;
+  --color-brand-2: #ff8a4c;
+  --color-on-brand: #1a0d05;
 
-  --color-good: #0b7f0b;
-  --color-good-soft: #e5f4e5;
-  --color-warn: #9a6400;
-  --color-warn-soft: #fdf3dd;
-  --color-serious: #b4451a;
-  --color-serious-soft: #fcebe3;
-  --color-crit: #c22f2f;
-  --color-crit-soft: #fbe7e7;
+  --color-good: #4cd48a;
+  --color-good-soft: #13302a;
+  --color-warn: #f5c04a;
+  --color-warn-soft: #33290f;
+  --color-serious: #ff8a5c;
+  --color-serious-soft: #3a2118;
+  --color-crit: #ff6b7a;
+  --color-crit-soft: #3d1a26;
 
   /* Chart series */
-  --color-series-ok: #8a8983;
-  --color-series-fail: #d03b3b;
-  --color-series-1: #2a78d6;
-  --color-series-2: #eb6834;
-  --color-series-3: #1baf7a;
+  --color-series-ok: #6f6590;
+  --color-series-fail: #ff5a6e;
+  --color-series-1: #9d8cff;
+  --color-series-2: #ff6b35;
+  --color-series-3: #3ecf9a;
 
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-canvas: #121211;
-    --color-surface: #1a1a19;
-    --color-sunken: #232321;
-    --color-line: #2e2e2b;
-    --color-line-strong: #3f3f3b;
-    --color-ink: #f5f5f3;
-    --color-ink-2: #c3c2b7;
-    --color-ink-3: #9c9b93;
-    --color-accent: #5598e7;
-    --color-accent-soft: #1b2a3d;
+:root {
+  color-scheme: dark;
+}
 
-    --color-good: #3fbf3f;
-    --color-good-soft: #16291a;
-    --color-warn: #f0b429;
-    --color-warn-soft: #2f2612;
-    --color-serious: #ec835a;
-    --color-serious-soft: #33211a;
-    --color-crit: #f07070;
-    --color-crit-soft: #361c1c;
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-canvas: #f7f5fb;
+  --color-surface: #ffffff;
+  --color-sunken: #f0ecf8;
+  --color-line: #e4dff0;
+  --color-line-strong: #cfc7e2;
+  --color-ink: #1d1530;
+  --color-ink-2: #4b4263;
+  --color-ink-3: #6b6283;
+  --color-accent: #5b46d6;
+  --color-accent-soft: #ece8fd;
+  --color-brand: #e8501a;
+  --color-brand-2: #f26a32;
+  --color-on-brand: #ffffff;
 
-    --color-series-ok: #6d6c66;
-    --color-series-fail: #e66767;
-    --color-series-1: #3987e5;
-    --color-series-2: #d95926;
-    --color-series-3: #199e70;
-    color-scheme: dark;
-  }
+  --color-good: #0b7f4a;
+  --color-good-soft: #e1f5ea;
+  --color-warn: #8f5f00;
+  --color-warn-soft: #fdf1d3;
+  --color-serious: #b4451a;
+  --color-serious-soft: #fcebe3;
+  --color-crit: #c22f45;
+  --color-crit-soft: #fbe4e8;
+
+  --color-series-ok: #9a93b3;
+  --color-series-fail: #d03b52;
+  --color-series-1: #5b46d6;
+  --color-series-2: #e8501a;
+  --color-series-3: #14966a;
 }
 
 @layer base {
@@ -70,6 +80,9 @@
   }
   body {
     @apply bg-canvas text-ink font-sans antialiased text-sm;
+    background-image: radial-gradient(60rem 28rem at 85% -8rem, color-mix(in srgb, var(--color-brand) 14%, transparent), transparent 70%),
+      radial-gradient(50rem 26rem at 0% -10rem, color-mix(in srgb, var(--color-accent) 16%, transparent), transparent 70%);
+    background-repeat: no-repeat;
   }
   :focus-visible {
     outline: 2px solid var(--color-accent);
@@ -80,13 +93,14 @@
 
 @layer components {
   .panel {
-    @apply bg-surface border border-line rounded-lg;
+    @apply bg-surface border border-line rounded-xl;
+    box-shadow: 0 1px 0 0 color-mix(in srgb, white 4%, transparent) inset, 0 8px 24px -16px rgb(0 0 0 / 0.5);
   }
   .panel-head {
     @apply flex items-center justify-between gap-3 px-4 py-3 border-b border-line;
   }
   .panel-title {
-    @apply text-xs font-semibold uppercase tracking-wide text-ink-2;
+    @apply text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-3;
   }
   .num {
     @apply font-mono tabular-nums;
@@ -97,8 +111,10 @@
     transition: background-color 120ms ease;
   }
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-md bg-ink text-canvas text-sm font-medium
-      hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-md text-on-brand text-sm font-semibold
+      hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed;
+    background-image: linear-gradient(135deg, var(--color-brand-2), var(--color-brand));
+    box-shadow: 0 6px 18px -8px var(--color-brand);
   }
   .input {
     @apply h-9 w-full rounded-md border border-line-strong bg-surface px-3 text-sm text-ink placeholder:text-ink-3;

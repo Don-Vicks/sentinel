@@ -1,6 +1,6 @@
 import { Link } from 'react-router';
 import type { Incident, Severity } from '../lib/types';
-import { ago, KIND_LABEL } from '../lib/format';
+import { ago, KIND_LABEL, num } from '../lib/format';
 import { SeverityBadge, StatusBadge } from './ui';
 
 const STRIPE: Record<Severity, string> = {
@@ -10,14 +10,24 @@ const STRIPE: Record<Severity, string> = {
   low: 'border-l-line-strong',
 };
 
-export function IncidentList({ incidents, showProgram = true }: { incidents: Incident[]; showProgram?: boolean }) {
+/** A count column in the issue stream: big number, small unit. */
+function Metric({ label, value }: { label: string; value: number }) {
+  return (
+    <span className="hidden md:flex flex-col items-end leading-tight">
+      <span className="num text-sm text-ink">{num(value)}</span>
+      <span className="text-[11px] text-ink-3">{label}</span>
+    </span>
+  );
+}
+
+export function IncidentList({ incidents, showProgram = true, counts = true }: { incidents: Incident[]; showProgram?: boolean; counts?: boolean }) {
   return (
     <ul className="divide-y divide-line">
       {incidents.map((i) => (
         <li key={i.id}>
           <Link
             to={`/incidents/${i.id}`}
-            className={`grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-0.5 border-l-2 px-4 py-3 hover:bg-sunken ${
+            className={`grid ${counts ? 'grid-cols-[auto_1fr_auto] md:grid-cols-[auto_1fr_5.5rem_5.5rem_6.5rem]' : 'grid-cols-[auto_1fr_auto]'} items-center gap-x-3 gap-y-0.5 border-l-2 px-4 py-3 hover:bg-sunken ${
               i.status === 'resolved' ? 'border-l-transparent' : STRIPE[i.severity]
             }`}
           >
@@ -30,6 +40,8 @@ export function IncidentList({ incidents, showProgram = true }: { incidents: Inc
               </span>
               <span className="block text-ink-2 truncate mt-0.5">{i.summary}</span>
             </span>
+            {counts && <Metric label="txs" value={i.affected_count} />}
+            {counts && <Metric label="wallets" value={i.affected_wallets} />}
             <span className="flex flex-col items-end gap-1">
               <StatusBadge status={i.status} />
               <span className="text-xs text-ink-3 num">{ago(i.detected_at)}</span>
