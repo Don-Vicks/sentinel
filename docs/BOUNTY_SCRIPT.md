@@ -1,4 +1,6 @@
-# Demo script for the Solami bounty, version 4: a true story (2:55, live on mainnet)
+# Demo script for the Solami bounty, version 4: a true story (planning notes)
+
+> **Source of truth: `docs/NARRATION.md`.** That file has the exact words to record, with every claim verified and the timing budgeted. This file is the planning background (story, evidence, claims, checklist). Where the two disagree, for example the agent prompts, the Protect program, or the Kamino references below, **NARRATION.md wins.**
 
 This version is built around something that **actually happened while Sentinel was running**, so the video has a story and not only features. It is verified on chain (below). It also leads with what a program team pays for: alerts where they work, and an agent that triages. The listing's rules still hold: **2 to 3 minutes, live on mainnet, Solami as the data path, "a submission that does not run live is not judged."**
 
