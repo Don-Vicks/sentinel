@@ -14,8 +14,7 @@ const STRIPE: Record<Severity, string> = {
 function Metric({ label, value }: { label: string; value: number }) {
   return (
     <span className="hidden md:flex flex-col items-end leading-tight">
-      <span className="num text-sm text-ink">{num(value)}</span>
-      <span className="text-[11px] text-ink-3">{label}</span>
+      <span className={`num text-sm ${value ? 'text-ink' : 'text-ink-3'}`} aria-label={`${label}: ${value}`}>{num(value)}</span>
     </span>
   );
 }
@@ -23,11 +22,20 @@ function Metric({ label, value }: { label: string; value: number }) {
 export function IncidentList({ incidents, showProgram = true, counts = true }: { incidents: Incident[]; showProgram?: boolean; counts?: boolean }) {
   return (
     <ul className="divide-y divide-line">
+      {counts && (
+        <li className="hidden md:grid grid-cols-[auto_1fr_5.5rem_5.5rem_6.5rem] gap-x-3 border-l-2 border-l-transparent bg-sunken/50 px-4 py-1.5 text-[11px] font-medium uppercase tracking-wider text-ink-3" aria-hidden>
+          <span className="w-12">ID</span>
+          <span>Incident</span>
+          <span className="text-right">Txs</span>
+          <span className="text-right">Wallets</span>
+          <span className="text-right">Status</span>
+        </li>
+      )}
       {incidents.map((i) => (
         <li key={i.id}>
           <Link
             to={`/incidents/${i.id}`}
-            className={`grid ${counts ? 'grid-cols-[auto_1fr_auto] md:grid-cols-[auto_1fr_5.5rem_5.5rem_6.5rem]' : 'grid-cols-[auto_1fr_auto]'} items-center gap-x-3 gap-y-0.5 border-l-2 px-4 py-3 hover:bg-sunken ${
+            className={`grid ${counts ? 'grid-cols-[auto_1fr_auto] md:grid-cols-[auto_1fr_5.5rem_5.5rem_6.5rem]' : 'grid-cols-[auto_1fr_auto]'} items-center gap-x-3 gap-y-0.5 border-l-2 px-4 py-2.5 hover:bg-sunken ${
               i.status === 'resolved' ? 'border-l-transparent' : STRIPE[i.severity]
             }`}
           >
@@ -40,7 +48,7 @@ export function IncidentList({ incidents, showProgram = true, counts = true }: {
               </span>
               <span className="block text-ink-2 truncate mt-0.5">{i.summary}</span>
             </span>
-            {counts && <Metric label="txs" value={i.affected_count} />}
+            {counts && <Metric label="transactions" value={i.affected_count} />}
             {counts && <Metric label="wallets" value={i.affected_wallets} />}
             <span className="flex flex-col items-end gap-1">
               <StatusBadge status={i.status} />

@@ -92,6 +92,19 @@
 }
 
 @layer components {
+  .hero-grid {
+    background-image: linear-gradient(var(--color-line) 1px, transparent 1px), linear-gradient(90deg, var(--color-line) 1px, transparent 1px),
+      radial-gradient(40rem 18rem at 80% 0, color-mix(in srgb, var(--color-brand) 22%, transparent), transparent 70%);
+    background-size: 44px 44px, 44px 44px, auto;
+    mask-image: linear-gradient(to bottom, black, transparent 85%);
+    opacity: 0.55;
+  }
+  .hero-accent {
+    background-image: linear-gradient(100deg, var(--color-brand-2), var(--color-brand) 45%, var(--color-accent));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
   .panel {
     @apply bg-surface border border-line rounded-xl;
     box-shadow: 0 1px 0 0 color-mix(in srgb, white 4%, transparent) inset, 0 8px 24px -16px rgb(0 0 0 / 0.5);
@@ -107,12 +120,12 @@
   }
   .btn {
     @apply inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-md border border-line-strong
-      bg-surface text-ink text-sm font-medium hover:bg-sunken disabled:opacity-50 disabled:cursor-not-allowed;
-    transition: background-color 120ms ease;
+      bg-sunken/60 text-ink text-sm font-medium hover:bg-sunken hover:border-ink-3 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed;
+    transition: background-color 120ms ease, border-color 120ms ease;
   }
   .btn-primary {
     @apply inline-flex items-center justify-center gap-1.5 h-9 px-3 rounded-md text-on-brand text-sm font-semibold
-      hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed;
+      hover:brightness-110 active:translate-y-px disabled:opacity-50 disabled:cursor-not-allowed;
     background-image: linear-gradient(135deg, var(--color-brand-2), var(--color-brand));
     box-shadow: 0 6px 18px -8px var(--color-brand);
   }
