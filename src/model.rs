@@ -516,6 +516,12 @@ pub enum Condition {
         kinds: Vec<IncidentKind>,
         min_severity: Severity,
     },
+    /// Sentinel itself can't see the chain: its stream stalled, or RPC keeps failing.
+    System {
+        /// Empty = any.
+        #[serde(default)]
+        kinds: Vec<SystemKind>,
+    },
     /// A call to an instruction, matched on its decoded name, arguments and accounts.
     Instruction {
         /// Instruction names to match, separated by `,` or `|`: `withdraw`, `set_*|update_*`.
@@ -538,6 +544,25 @@ pub enum Condition {
         #[serde(default)]
         first_seen_signer: bool,
     },
+}
+
+/// Ways Sentinel can be blind, as opposed to something being wrong with a program.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemKind {
+    /// The chain tip stopped advancing on the stream; detectors are paused.
+    FeedStalled,
+    /// Several RPC calls in a row failed.
+    RpcFailing,
+}
+
+impl SystemKind {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::FeedStalled => "Sentinel's feed has stalled",
+            Self::RpcFailing => "Sentinel's RPC is failing",
+        }
+    }
 }
 
 fn yes_default() -> bool {

@@ -253,6 +253,7 @@ export type Condition =
   | { type: 'transfer'; mint: string | null; min_amount: number }
   | { type: 'transfer_usd'; min_usd: number }
   | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity }
+  | { type: 'system'; kinds: ('feed_stalled' | 'rpc_failing')[] }
   | {
       type: 'instruction';
       name: string;

@@ -46,6 +46,8 @@ pub struct Sentinel {
     pub beam: crate::beam::BeamClient,
     /// The chain tip according to RPC, and when it was read; the stream's freshness is judged against it.
     chain_tip: Mutex<(u64, i64)>,
+    /// RPC polls that failed in a row.
+    rpc_failures: std::sync::atomic::AtomicU32,
     /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     /// Who can upgrade each program, read from chain and kept for a few minutes.
@@ -77,12 +79,19 @@ struct State {
     /// Detectors stay paused until this time after a stall, while the gap washes out of the windows.
     hold_until: i64,
     stalled: bool,
+    /// Which system problems have been announced and not yet resolved, and when each last was.
+    system_open: HashSet<SystemKind>,
+    system_last: HashMap<SystemKind, i64>,
 }
 
 /// Seconds without the chain tip advancing before the feed counts as stalled.
 const STALL_SECS: i64 = 15;
 /// How long after an upgrade a new incident is attributed to it.
 const DEPLOY_WINDOW_SECS: i64 = 30 * 60;
+/// RPC polls (every 5 seconds) that must fail in a row before it is announced.
+const RPC_FAILURES_BEFORE_ALERT: u32 = 3;
+/// Least time between two announcements of the same system problem.
+const SYSTEM_MIN_GAP_SECS: i64 = 120;
 /// How often the open hour's rollup is written to disk.
 const ROLLUP_FLUSH_SECS: i64 = 30;
 /// Seconds detectors stay paused after the feed comes back.
@@ -245,6 +254,7 @@ impl Sentinel {
             idls,
             beam: crate::beam::BeamClient::new(),
             chain_tip: Mutex::new((0, 0)),
+            rpc_failures: std::sync::atomic::AtomicU32::new(0),
             rpc_txs: Mutex::new(HashMap::new()),
             postures: Mutex::new(HashMap::new()),
             seen_signers: Mutex::new(HashSet::new()),
@@ -277,8 +287,14 @@ impl Sentinel {
             let this = self.clone();
             tokio::spawn(async move {
                 loop {
-                    if let Ok(slot) = rpc.get_slot_with_commitment(solana_sdk::commitment_config::CommitmentConfig::processed()).await {
-                        *this.chain_tip.lock().unwrap() = (slot, Utc::now().timestamp());
+                    match rpc.get_slot_with_commitment(solana_sdk::commitment_config::CommitmentConfig::processed()).await {
+                        Ok(slot) => {
+                            *this.chain_tip.lock().unwrap() = (slot, Utc::now().timestamp());
+                            this.rpc_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            this.rpc_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
@@ -522,6 +538,24 @@ impl Sentinel {
         }
         state.stalled = stalled;
         let paused = now < state.hold_until;
+
+        // Tell the people whose rules ask for it when Sentinel can't see, and when it can again.
+        let rpc_failing = self.rpc.is_some() && self.rpc_failures.load(std::sync::atomic::Ordering::Relaxed) >= RPC_FAILURES_BEFORE_ALERT;
+        for (kind, active) in [(SystemKind::FeedStalled, stalled), (SystemKind::RpcFailing, rpc_failing)] {
+            let announced = state.system_open.contains(&kind);
+            if active && !announced {
+                // A flapping feed shouldn't page every few seconds.
+                if state.system_last.get(&kind).is_some_and(|t| now - t < SYSTEM_MIN_GAP_SECS) {
+                    continue;
+                }
+                state.system_open.insert(kind);
+                state.system_last.insert(kind, now);
+                alerts.extend(self.system_alerts(&rules, &state.programs, kind, true));
+            } else if !active && announced {
+                state.system_open.remove(&kind);
+                alerts.extend(self.system_alerts(&rules, &state.programs, kind, false));
+            }
+        }
 
         for ps in state.programs.values_mut() {
             ps.window.advance(now);
@@ -1258,6 +1292,43 @@ impl Sentinel {
         }))
     }
 
+    /// Alerts for rules that watch for Sentinel itself being blind. They go to the owners of
+    /// rules, provided the owner watches at least one program (or the rule predates accounts).
+    fn system_alerts(&self, rules: &[AlertRule], programs: &HashMap<String, ProgramState>, kind: SystemKind, active: bool) -> Vec<Alert> {
+        let message = match (kind, active) {
+            (SystemKind::FeedStalled, true) => "No new chain slots have arrived for over 15 seconds. Sentinel is blind, so detectors are paused and quiet programs are not being reported as down.".to_string(),
+            (SystemKind::FeedStalled, false) => "The feed is moving again. Detectors resume after a short grace period.".to_string(),
+            (SystemKind::RpcFailing, true) => "Several RPC calls in a row have failed. Owner labels, IDL loading, transaction lookups and the chain-tip check are affected.".to_string(),
+            (SystemKind::RpcFailing, false) => "RPC calls are succeeding again.".to_string(),
+        };
+        let event = if active { AlertEvent::Opened } else { AlertEvent::Resolved };
+        rules
+            .iter()
+            .filter(|r| r.enabled && r.has_targets())
+            .filter(|r| matches!(&r.condition, Condition::System { kinds } if kinds.is_empty() || kinds.contains(&kind)))
+            .filter(|r| r.owner.as_deref().is_none_or(|o| programs.values().any(|ps| ps.watchers.contains(o))))
+            .map(|rule| Alert {
+                rule: rule.clone(),
+                program_id: "sentinel".into(),
+                program_label: "Sentinel".into(),
+                message: format!("{}: {message}", kind.title()),
+                incident_id: None,
+                severity: Severity::High,
+                event,
+                payload: json!({
+                    "event": "sentinel.system",
+                    "system": kind,
+                    "active": active,
+                    "rule": { "id": rule.id, "name": rule.name },
+                    "severity": Severity::High,
+                    "program": { "id": "sentinel", "label": "Sentinel" },
+                    "message": message,
+                    "links": { "incident": self.public_url.trim_end_matches('/') },
+                }),
+            })
+            .collect()
+    }
+
     /// An upgrade, authority change or closure of the monitored program itself.
     fn authority_incident(
         &self,
@@ -1417,7 +1488,7 @@ impl Sentinel {
                 Condition::Metric { value, window_secs, .. } => (Some(*value), *window_secs as i64),
                 Condition::Transfer { min_amount, .. } => (Some(*min_amount), 60),
                 Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
-                Condition::Incident { .. } | Condition::Instruction { .. } => (None, 60),
+                Condition::Incident { .. } | Condition::Instruction { .. } | Condition::System { .. } => (None, 60),
             };
             let incident = Incident {
                 id: 0,

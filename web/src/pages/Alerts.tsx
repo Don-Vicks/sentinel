@@ -12,7 +12,7 @@ import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../comp
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
-type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'system';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
@@ -24,6 +24,7 @@ const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: numb
   { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000 },
   { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
   { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0 },
+  { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0 },
 ];
 
 const OPS: { value: FilterOp; label: string }[] = [
@@ -77,6 +78,8 @@ function describe(c: Condition) {
       return `transfer ≥ ${c.min_amount.toLocaleString()} ${MINTS.find((m) => m.value === (c.mint ?? ''))?.label ?? short(c.mint)}`;
     case 'incident':
       return `incident opens (severity ≥ ${c.min_severity}${c.kinds.length ? `, ${c.kinds.join('/')}` : ''})`;
+    case 'system':
+      return `Sentinel itself is blind (${c.kinds.length ? c.kinds.join(' / ').replace(/_/g, ' ') : 'feed stalled or RPC failing'}), and when it recovers`;
     case 'instruction': {
       const symbols: Record<FilterOp, string> = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains' };
       const conds = c.filters.map((f) => `${f.path.replace(/^args\./, '')} ${symbols[f.op]} ${f.value}`).join(c.match_mode === 'any' ? ' or ' : ' and ');
@@ -91,6 +94,7 @@ const PRESETS: { label: string; hint: string; template: Template; value: string;
   { label: 'Traffic above 300 TPS', hint: 'A surge in activity', template: 'tps', value: '300', window: '10', severity: 'medium', name: 'Traffic above 300 TPS' },
   { label: 'Transfer worth $10K+', hint: 'USD priced by Solami Blur', template: 'transfer_usd', value: '10000', severity: 'medium', name: 'Transfer worth $10K or more' },
   { label: 'Any incident', hint: 'Forward every detector incident', template: 'incident', value: '0', severity: 'high', name: 'Every incident' },
+  { label: 'Sentinel feed problems', hint: 'Tells you when Sentinel cannot see the chain, and when it can again', template: 'system', value: '0', severity: 'high', name: 'Sentinel feed problems' },
   { label: 'Admin call from a new wallet', hint: 'set_*, update_*, withdraw*, pause, authority changes, from a wallet that has never called them', template: 'instruction', value: '0', severity: 'critical', name: 'Admin instruction from a new wallet' },
 ];
 
@@ -140,6 +144,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     if (template === 'transfer') return { type: 'transfer', mint: mint || null, min_amount: v };
     if (template === 'transfer_usd') return { type: 'transfer_usd', min_usd: v };
     if (template === 'incident') return { type: 'incident', kinds: [], min_severity: minSeverity };
+    if (template === 'system') return { type: 'system', kinds: [] };
     if (template === 'instruction') {
       return {
         type: 'instruction',
@@ -160,7 +165,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Name an instruction, add a condition, or choose first-time signers; otherwise this would fire on every call.');
       return;
     }
-    if (template !== 'incident' && template !== 'instruction' && !(Number(value) > 0)) {
+    if (template !== 'incident' && template !== 'instruction' && template !== 'system' && !(Number(value) > 0)) {
       setError('Enter a threshold greater than zero.');
       return;
     }
@@ -175,7 +180,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         name: name.trim() || (template === 'instruction' ? `${ixName.trim() || 'Instruction'} called` : `${tpl.label} ${template === 'incident' ? minSeverity : value}${tpl.unit}`),
         program_id: program || null,
         condition: condition(),
-        create_incident: template === 'incident' ? false : createIncident,
+        create_incident: template === 'incident' || template === 'system' ? false : createIncident,
         severity,
         channels: channels.map(draftToChannel),
         cooldown_secs: Number(cooldown) || 0,
@@ -239,7 +244,11 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             {TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
         </div>
-        {template === 'instruction' ? (
+        {template === 'system' ? (
+          <p className="md:col-span-2 text-xs text-ink-3">
+            Fires when the chain tip stops advancing on Sentinel's stream (detectors pause, so a quiet program isn't reported as down) or when RPC calls keep failing, and again when it recovers.
+          </p>
+        ) : template === 'instruction' ? (
           <div className="md:col-span-2 text-xs text-ink-3">
             {program
               ? idl.data?.loaded
@@ -368,7 +377,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         <div className="md:col-span-3">
           <ChannelEditor value={channels} onChange={setChannels} />
         </div>
-        {template !== "incident" && (
+        {template !== "incident" && template !== "system" && (
           <label className="flex items-center gap-2 text-sm text-ink-2 md:col-span-3">
             <input type="checkbox" checked={createIncident} onChange={(e) => setCreateIncident(e.target.checked)} />
             Open an incident with the matching transactions
