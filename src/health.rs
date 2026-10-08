@@ -423,6 +423,7 @@ mod tests {
             authority_kind: "single_key",
             last_deployed_slot: None,
             code_bytes: None,
+            controller: None,
             risks: vec![],
         };
         let mut i = inputs(&s, &[]);

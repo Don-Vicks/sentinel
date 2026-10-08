@@ -50,6 +50,10 @@ pub struct AuthorityEvent {
     pub slot: u64,
     /// Instruction path in the transaction; "3.1" means it ran via CPI.
     pub path: String,
+    /// The Squads multisig call that executed it, when that is what ran it.
+    pub via: Option<crate::squads::Via>,
+    /// What that multisig requires to act, filled in once it has been read from chain.
+    pub multisig: Option<crate::squads::MultisigInfo>,
 }
 
 impl AuthorityEvent {
@@ -79,13 +83,27 @@ impl AuthorityEvent {
         self.path.contains('.')
     }
 
+    /// Who did it: the Squads multisig and member when one ran it, else the signing key.
+    pub fn executed_by(&self) -> String {
+        match &self.via {
+            Some(v) => format!(
+                "{} multisig {}{}{}",
+                v.program,
+                short(&v.multisig),
+                v.executor.as_deref().map(|e| format!(" (member {})", short(e))).unwrap_or_default(),
+                self.multisig.as_ref().map(|m| format!(", {}", m.describe())).unwrap_or_default()
+            ),
+            None => self.authority.as_deref().map(short).unwrap_or_else(|| "unknown".into()),
+        }
+    }
+
     pub fn summary(&self) -> String {
-        let who = self.authority.as_deref().map(short).unwrap_or_else(|| "unknown".into());
+        let who = self.executed_by();
         match &self.action {
             Action::Upgrade { buffer } => format!(
                 "New code deployed{} by {who}{}",
                 buffer.as_deref().map(|b| format!(" from buffer {}", short(b))).unwrap_or_default(),
-                if self.via_cpi() { " (via CPI, e.g. a multisig vote)" } else { "" }
+                if self.via_cpi() && self.via.is_none() { " (via CPI, e.g. a multisig vote)" } else { "" }
             ),
             Action::SetAuthority { new_authority: Some(new) } => {
                 format!("Upgrade authority moved from {who} to {}", short(new))
@@ -179,6 +197,8 @@ pub fn detect(tx: &VortexTransaction, program_id: &str, programdata: &str) -> Ve
                 signature: tx.signature.clone(),
                 slot: tx.slot,
                 path: ix.path.clone(),
+                via: crate::squads::executed_by(tx, &ix.path),
+                multisig: None,
             })
         })
         .collect()
@@ -200,7 +220,17 @@ pub struct Posture {
     pub authority_kind: &'static str,
     pub last_deployed_slot: Option<u64>,
     pub code_bytes: Option<usize>,
+    /// What is known to hold the authority, from upgrades Sentinel has watched it make.
+    pub controller: Option<Controller>,
     pub risks: Vec<Risk>,
+}
+
+/// A Squads multisig seen executing upgrades with this program's authority.
+#[derive(Debug, Clone, Serialize)]
+pub struct Controller {
+    pub name: String,
+    pub multisig: String,
+    pub requires: Option<crate::squads::MultisigInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +316,7 @@ fn posture(kind: &'static str, authority: Option<String>, slot: Option<u64>, cod
         authority_kind: kind,
         last_deployed_slot: slot,
         code_bytes,
+        controller: None,
         risks,
     }
 }
@@ -356,6 +387,8 @@ mod tests {
             signature: "5".repeat(64),
             slot: 1,
             path: "0".into(),
+            via: None,
+            multisig: None,
         };
         assert_eq!(ev(Action::Upgrade { buffer: None }).severity(), Severity::High);
         assert_eq!(ev(Action::SetAuthority { new_authority: Some("N".into()) }).severity(), Severity::Critical);

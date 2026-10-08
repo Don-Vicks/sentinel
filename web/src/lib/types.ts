@@ -191,6 +191,16 @@ export interface AuthorityEvidence {
   new_authority?: string | null;
   recipient?: string | null;
   additional_bytes?: number;
+  /** The Squads multisig call that executed it. */
+  via?: { program: string; program_id: string; multisig: string; executor: string | null; instruction: string | null } | null;
+  /** What that multisig requires, once read from chain. */
+  multisig?: MultisigInfo | null;
+}
+
+export interface MultisigInfo {
+  threshold: number;
+  members: number;
+  time_lock: number;
 }
 
 export interface DeployEvidence {
@@ -211,6 +221,8 @@ export interface Posture {
   authority_kind: 'none' | 'single_key' | 'program_controlled';
   last_deployed_slot: number | null;
   code_bytes: number | null;
+  /** A Squads multisig seen executing upgrades with this authority. */
+  controller?: { name: string; multisig: string; requires: MultisigInfo | null } | null;
   risks: { level: Severity; text: string }[];
 }
 

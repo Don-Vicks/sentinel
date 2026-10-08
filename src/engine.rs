@@ -52,6 +52,9 @@ pub struct Sentinel {
     backfill_queue: tokio::sync::mpsc::UnboundedSender<String>,
     backfill_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     backfilled: Mutex<HashSet<String>>,
+    /// Multisigs whose settings should be read for an incident, (incident id, multisig address).
+    enrich_queue: tokio::sync::mpsc::UnboundedSender<(i64, String)>,
+    enrich_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(i64, String)>>>,
     /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     /// Who can upgrade each program, read from chain and kept for a few minutes.
@@ -261,6 +264,7 @@ impl Sentinel {
         }
         let idls = IdlRegistry::new(rpc.clone());
         let (backfill_queue, backfill_inbox) = tokio::sync::mpsc::unbounded_channel();
+        let (enrich_queue, enrich_inbox) = tokio::sync::mpsc::unbounded_channel();
         let auth = crate::auth::Auth::new(store.clone(), &public_url);
         let store_for_writer = store.clone();
         let this = Arc::new(Self {
@@ -275,6 +279,8 @@ impl Sentinel {
             backfill_queue,
             backfill_inbox: Mutex::new(Some(backfill_inbox)),
             backfilled: Mutex::new(HashSet::new()),
+            enrich_queue,
+            enrich_inbox: Mutex::new(Some(enrich_inbox)),
             rpc_txs: Mutex::new(HashMap::new()),
             postures: Mutex::new(HashMap::new()),
             seen_signers: Mutex::new(HashSet::new()),
@@ -319,6 +325,19 @@ impl Sentinel {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             });
+        }
+        // Read the settings of a multisig that executed an upgrade, to say how many must sign.
+        if self.rpc.is_some() {
+            if let Some(mut inbox) = self.enrich_inbox.lock().unwrap().take() {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    while let Some((incident, multisig)) = inbox.recv().await {
+                        if let Err(e) = this.enrich_multisig(incident, &multisig).await {
+                            tracing::debug!(incident, %multisig, error = %e, "could not read the multisig");
+                        }
+                    }
+                });
+            }
         }
         // Load each program's recent history so detectors have a baseline from the first minute.
         if self.rpc.is_some() {
@@ -1413,8 +1432,46 @@ impl Sentinel {
             if let Some(open) = ps.open.get_mut(&key) {
                 link_tx(&self.writer, open, tx, summary, second);
                 open.dirty = true;
+                if let Some(via) = &event.via {
+                    let _ = self.enrich_queue.send((open.incident.id, via.multisig.clone()));
+                }
             }
         }
+    }
+
+    /// Adds what a multisig requires (3 of 5 signatures) to the incident its execution opened.
+    pub async fn enrich_multisig(&self, incident_id: i64, multisig: &str) -> Result<()> {
+        let Some(rpc) = &self.rpc else { return Ok(()) };
+        let Some(info) = crate::squads::fetch_multisig(rpc, multisig).await? else { return Ok(()) };
+        let apply = |inc: &mut Incident| {
+            if inc.evidence["authority"].get("multisig").is_some_and(|m| !m.is_null()) {
+                return false;
+            }
+            inc.evidence["authority"]["multisig"] = json!(info);
+            inc.summary = format!("{} ({})", inc.summary, info.describe());
+            inc.explanation = format!("{} The multisig needs {} to act.", inc.explanation, info.describe());
+            inc.updated_at = Utc::now();
+            true
+        };
+        {
+            let mut state = self.state.lock().unwrap();
+            for ps in state.programs.values_mut() {
+                if let Some(open) = ps.open.values_mut().find(|o| o.incident.id == incident_id) {
+                    if apply(&mut open.incident) {
+                        open.dirty = true;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        // Already closed: update the stored record.
+        if let Some(mut inc) = self.store.incident(incident_id)? {
+            if apply(&mut inc) {
+                self.store.update_incident(&inc)?;
+                self.emit(LiveEvent::Incident { change: IncidentChange::Updated, incident: Box::new(inc) });
+            }
+        }
+        Ok(())
     }
 
     fn large_transfer_incident(
@@ -2273,6 +2330,20 @@ impl Sentinel {
         Ok(summary)
     }
 
+    /// A Squads multisig that has executed upgrades with `authority`, from incidents Sentinel recorded.
+    fn known_controller(&self, program_id: &str, authority: Option<&str>) -> Option<crate::posture::Controller> {
+        let authority = authority?;
+        self.store.incidents(Some(program_id), 200).ok()?.into_iter().find_map(|i| {
+            let a = &i.evidence["authority"];
+            let via = a.get("via").filter(|v| !v.is_null())?;
+            (a["authority"].as_str() == Some(authority)).then(|| crate::posture::Controller {
+                name: via["program"].as_str().unwrap_or("multisig").to_string(),
+                multisig: via["multisig"].as_str().unwrap_or_default().to_string(),
+                requires: serde_json::from_value(a["multisig"].clone()).ok(),
+            })
+        })
+    }
+
     pub fn is_monitored(&self, program_id: &str) -> bool {
         self.state.lock().unwrap().programs.contains_key(program_id)
     }
@@ -2286,7 +2357,8 @@ impl Sentinel {
             }
         }
         let Some(rpc) = &self.rpc else { bail!("Needs a Solana RPC; set SOLANA_RPC_URL") };
-        let posture = crate::posture::fetch(rpc, program_id).await?;
+        let mut posture = crate::posture::fetch(rpc, program_id).await?;
+        posture.controller = self.known_controller(program_id, posture.authority.as_deref());
         let mut cache = self.postures.lock().unwrap();
         if cache.len() > 500 {
             cache.retain(|_, (at, _)| at.elapsed() < FRESH);

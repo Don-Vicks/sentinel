@@ -57,6 +57,13 @@ export function PostureCard({ programId, incidents }: { programId: string; incid
               </>
             )}
           </dl>
+          {data.controller && (
+            <p className="text-ink-2">
+              Upgrades have been executed by a {data.controller.name} multisig{' '}
+              <a className="link" href={explorerAccount(data.controller.multisig)} target="_blank" rel="noreferrer"><Address value={data.controller.multisig} n={6} copy={false} /></a>
+              {data.controller.requires && ` that needs ${data.controller.requires.threshold} of ${data.controller.requires.members} signatures`}.
+            </p>
+          )}
           {data.risks.map((r) => (
             <p key={r.text} className="text-ink-2 flex gap-2">
               <SeverityBadge severity={r.level} />

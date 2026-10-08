@@ -31,6 +31,7 @@ pub mod report;
 pub mod rollup;
 pub mod resolve;
 pub mod source;
+pub mod squads;
 pub mod store;
 pub mod trace;
 pub mod writer;

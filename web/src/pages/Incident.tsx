@@ -64,7 +64,15 @@ function AuthorityPanel({ ev }: { ev: AuthorityEvidence }) {
     rows.push(['New authority', ev.new_authority ? <Address value={ev.new_authority} n={6} /> : 'none: the program is now immutable']);
   if (ev.action === 'close' && ev.recipient) rows.push(['Funds to', <Address value={ev.recipient} n={6} />]);
   if (ev.action === 'extend') rows.push(['Added', `${num(ev.additional_bytes ?? 0)} bytes`]);
-  rows.push(['Executed via', ev.path.includes('.') ? 'another program (CPI), such as a multisig vote' : 'a direct instruction']);
+  if (ev.via) {
+    rows.push(['Executed by', <span>{ev.via.program} multisig <Address value={ev.via.multisig} n={6} /></span>]);
+    if (ev.via.executor) rows.push(['Member who signed', <Address value={ev.via.executor} n={6} />]);
+    if (ev.multisig) {
+      rows.push(['It requires', `${ev.multisig.threshold} of ${ev.multisig.members} signatures${ev.multisig.time_lock ? `, then a ${Math.round(ev.multisig.time_lock / 3600)}h time lock` : ''}`]);
+    }
+  } else {
+    rows.push(['Executed via', ev.path.includes('.') ? 'another program (CPI), such as a multisig vote' : 'a direct instruction']);
+  }
   rows.push(['Transaction', <a className="link font-mono text-xs" href={explorer(ev.signature)} target="_blank" rel="noreferrer">{short(ev.signature, 6)}</a>]);
   rows.push(['Slot', num(ev.slot)]);
   return (
