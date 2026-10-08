@@ -129,3 +129,43 @@ async fn metrics_describe_the_stream_programs_incidents_and_deliveries() {
     std::env::remove_var("SENTINEL_METRICS_TOKEN");
     let _ = std::fs::remove_file(&dir);
 }
+
+async fn fetch(app: &axum::Router, path: &str) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    use tower::ServiceExt;
+    let res = app.clone().oneshot(axum::http::Request::builder().uri(path).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+    let (status, headers) = (res.status(), res.headers().clone());
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 22).await.unwrap();
+    (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+}
+
+#[tokio::test]
+async fn anyone_can_see_a_programs_status_and_embed_its_badge() {
+    let dir = std::env::temp_dir().join(format!("sentinel-status-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(16);
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
+    s.add_program(PUMP.into(), None).unwrap();
+    let app = sentinel::api::router(s.clone());
+
+    // No sign-in needed.
+    let (status, _, body) = fetch(&app, &format!("/api/public/status/{PUMP}")).await;
+    assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["program"]["label"], "Pump.fun");
+    assert_eq!(v["health"]["status"], "learning", "a brand-new program is still learning");
+    assert_eq!(v["uptime_percent"], 100.0);
+    assert_eq!(v["open_incidents"], 0);
+    assert!(v["incidents"].as_array().unwrap().is_empty());
+    assert_eq!(fetch(&app, "/api/public/status/NotAProgram111111111111111111111111111111").await.0, axum::http::StatusCode::NOT_FOUND);
+
+    // The badge is an SVG that says what it shows, and can be cached briefly.
+    let (status, headers, svg) = fetch(&app, &format!("/badge/{PUMP}.svg")).await;
+    assert_eq!(status, axum::http::StatusCode::OK);
+    assert_eq!(headers["content-type"], "image/svg+xml");
+    assert!(headers["cache-control"].to_str().unwrap().contains("max-age"));
+    assert!(svg.starts_with("<svg") && svg.contains("sentinel: learning"), "{svg}");
+    let (_, _, unknown) = fetch(&app, "/badge/NotAProgram111111111111111111111111111111.svg").await;
+    assert!(unknown.contains("not monitored"), "{unknown}");
+    let _ = std::fs::remove_file(&dir);
+}

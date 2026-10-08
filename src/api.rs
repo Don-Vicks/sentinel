@@ -84,6 +84,8 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/alerts", get(list_alerts))
         .route("/api/stream", get(stream))
         .route("/metrics", get(metrics))
+        .route("/api/public/status/{id}", get(public_status))
+        .route("/badge/{file}", get(badge))
         .merge(crate::mcp::router())
         .layer(axum::middleware::from_fn_with_state(sentinel.clone(), crate::limits::rate_limit))
         .with_state(sentinel)
@@ -281,6 +283,83 @@ async fn program_posture(State(s): State<AppState>, Path(id): Path<String>) -> A
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, crate::redact::scrub(&e.to_string())))?;
     Ok(Json(json!(posture)))
+}
+
+/// Everything a public status page shows for one program. It uses only what the dashboard
+/// already shows to anyone: health, incidents and a week of history.
+async fn public_status(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    let _ = s.posture(&id).await;
+    let week = s.summary(&id, 7 * 24 * 3600)?;
+    let health = s.health(&id).ok_or_else(|| not_found("program"))?;
+    let labels = s.program_labels();
+    let incidents: Vec<Value> = s
+        .store
+        .incidents(Some(&id), 60)?
+        .into_iter()
+        .filter(|i| !matches!(i.kind, crate::model::IncidentKind::LargeTransfer))
+        .take(15)
+        .map(|i| {
+            json!({
+                "id": i.id, "kind": i.kind.as_str(), "severity": i.severity, "status": i.status, "title": i.title,
+                "summary": i.summary, "detected_at": i.detected_at, "resolved_at": i.resolved_at,
+            })
+        })
+        .collect();
+    let minutes = week.reliability.minutes_in_incident as f64;
+    let covered_minutes = (week.period_secs as f64 / 60.0) * week.coverage.max(0.0);
+    // The share of the time Sentinel watched that had no open reliability incident.
+    let uptime = if covered_minutes > 0.0 { ((1.0 - minutes / covered_minutes) * 100.0).clamp(0.0, 100.0) } else { 100.0 };
+    Ok(Json(json!({
+        "program": { "id": id, "label": labels.get(&id) },
+        "health": { "score": health.score, "status": health.status, "headline": health.headline },
+        "uptime_percent": uptime,
+        "uptime_days": 7,
+        "coverage": week.coverage,
+        "transactions_7d": week.activity.tx,
+        "success_rate_7d": week.activity.success_rate,
+        "incidents_7d": week.reliability.opened,
+        "mean_time_to_resolve_secs": week.reliability.mttr_secs,
+        "open_incidents": incidents.iter().filter(|i| i["status"] != "resolved").count(),
+        "incidents": incidents,
+        "generated_at": Utc::now(),
+    })))
+}
+
+/// A small SVG showing a program's health, for a README or a docs page: `/badge/<program>.svg`.
+async fn badge(State(s): State<AppState>, Path(file): Path<String>) -> Response {
+    let id = file.trim_end_matches(".svg");
+    let (value, color) = match s.health(id) {
+        None => ("not monitored".to_string(), "#6f6e69"),
+        Some(h) => match (h.score, h.status) {
+            (Some(score), "healthy") => (format!("{score} healthy"), "#0b7f0b"),
+            (Some(score), "degraded") => (format!("{score} degraded"), "#9a6400"),
+            (Some(score), _) => (format!("{score} critical"), "#c22f2f"),
+            (None, _) => ("learning".to_string(), "#6f6e69"),
+        },
+    };
+    let label = "sentinel";
+    // Width from the text, at about 6.5px a character plus padding.
+    let lw = (label.len() as f64 * 6.5 + 14.0).round();
+    let vw = (value.len() as f64 * 6.5 + 14.0).round();
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"20\" role=\"img\" aria-label=\"{label}: {value}\"><title>{label}: {value}</title>\
+<linearGradient id=\"s\" x2=\"0\" y2=\"100%\"><stop offset=\"0\" stop-color=\"#bbb\" stop-opacity=\".1\"/><stop offset=\"1\" stop-opacity=\".1\"/></linearGradient>\
+<clipPath id=\"r\"><rect width=\"{w}\" height=\"20\" rx=\"3\" fill=\"#fff\"/></clipPath>\
+<g clip-path=\"url(#r)\"><rect width=\"{lw}\" height=\"20\" fill=\"#555\"/><rect x=\"{lw}\" width=\"{vw}\" height=\"20\" fill=\"{color}\"/><rect width=\"{w}\" height=\"20\" fill=\"url(#s)\"/></g>\
+<g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\"><text x=\"{lx}\" y=\"14\">{label}</text><text x=\"{vx}\" y=\"14\">{value}</text></g></svg>",
+        w = lw + vw,
+        lx = lw / 2.0,
+        vx = lw + vw / 2.0,
+        value = value.replace('&', "&amp;").replace('<', "&lt;"),
+    );
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml"), (header::CACHE_CONTROL, "public, max-age=60")],
+        svg,
+    )
+        .into_response()
 }
 
 /// Prometheus metrics. Set `SENTINEL_METRICS_TOKEN` to require `Authorization: Bearer <token>`.

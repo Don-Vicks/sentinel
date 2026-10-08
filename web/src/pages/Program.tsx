@@ -208,6 +208,9 @@ export function Program() {
         }
         actions={
           <>
+          <Link to={`/status/${id}`} className="btn" target="_blank" title="A public page for this program, with an embeddable badge">
+            Status page
+          </Link>
           <Link to={`/programs/${id}/summary`} className="btn">
             <FileText className="size-4" aria-hidden /> Summary
           </Link>

@@ -14,6 +14,7 @@ import { Incident, Incidents } from './pages/Incident';
 import { Transaction } from './pages/Transaction';
 import { Alerts } from './pages/Alerts';
 import { ProgramSummary } from './pages/Summary';
+import { StatusPage } from './pages/Status';
 import { Empty } from './components/ui';
 
 function NotFound() {
@@ -33,6 +34,7 @@ createRoot(document.getElementById('root')!).render(
       <SignInDialog />
       <BrowserRouter>
         <Routes>
+          <Route path="status/:id" element={<StatusPage />} />
           <Route element={<Layout />}>
             <Route index element={<Overview />} />
             <Route path="programs/:id" element={<Program />} />
