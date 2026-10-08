@@ -24,6 +24,7 @@ pub mod simulate;
 pub mod summary;
 pub mod model;
 pub mod posture;
+pub mod prom;
 pub mod pricing;
 pub mod redact;
 pub mod report;

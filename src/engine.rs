@@ -1615,6 +1615,85 @@ impl Sentinel {
         self.writer.flush();
     }
 
+    /// Everything worth graphing, in Prometheus text format.
+    pub fn metrics_text(&self) -> String {
+        use crate::prom::Exposition;
+        let mut e = Exposition::default();
+        let stream = self.stream_health();
+        e.gauge("sentinel_up", "Sentinel is running.", &[], 1.0);
+        e.gauge("sentinel_uptime_seconds", "Seconds since Sentinel started streaming.", &[], stream.uptime_secs as f64);
+        e.gauge("sentinel_stream_connected", "1 while the transaction stream is connected and moving.", &[("transport", stream.transport)], stream.connected as u8 as f64);
+        e.gauge("sentinel_stream_stalled", "1 while the chain tip has stopped advancing and detectors are paused.", &[], stream.stalled as u8 as f64);
+        e.gauge("sentinel_ingest_tps", "Transactions per second entering Sentinel.", &[], stream.ingest_tps);
+        e.gauge("sentinel_stream_slot_lag", "Slots between the chain tip seen on the stream and the newest transaction.", &[], stream.slot_lag as f64);
+        if let Some(behind) = stream.behind_chain_slots {
+            e.gauge("sentinel_stream_behind_chain_slots", "Slots the stream is behind the chain tip read over RPC.", &[], behind as f64);
+        }
+        if let Some(ms) = stream.last_transaction_age_ms {
+            e.gauge("sentinel_stream_last_transaction_age_seconds", "Seconds since the last transaction arrived.", &[], ms as f64 / 1000.0);
+        }
+        e.counter("sentinel_transactions_received_total", "Transactions received from the stream.", &[], stream.transactions_received as f64);
+        e.counter("sentinel_transactions_dropped_total", "Transactions missed because Sentinel fell behind.", &[], stream.dropped as f64);
+        e.gauge("sentinel_idls_loaded", "Programs whose Anchor IDL is loaded.", &[], self.idls.loaded() as f64);
+        e.gauge("sentinel_priced_tokens", "Tokens priced through Blur.", &[], stream.pricing.priced_mints as f64);
+
+        for p in self.programs() {
+            let l = [("program", p.program_id.as_str()), ("label", p.label.as_str())];
+            e.gauge("sentinel_program_tps", "Transactions per second over the last 10 seconds.", &l, p.tps_10s);
+            e.gauge("sentinel_program_transactions_60s", "Transactions in the last minute.", &l, p.tx_60s as f64);
+            e.gauge("sentinel_program_failure_rate_percent", "Percent of transactions failing over the last minute.", &l, p.failure_rate_60s);
+            e.gauge("sentinel_program_baseline_failure_rate_percent", "The program's normal failure rate.", &l, p.baseline_failure_rate);
+            e.gauge("sentinel_program_avg_compute_units", "Average compute units per transaction over the last minute.", &l, p.avg_cu_60s);
+            e.gauge("sentinel_program_unique_signers_60s", "Distinct fee payers in the last minute.", &l, p.unique_signers_60s as f64);
+            e.gauge("sentinel_program_open_incidents", "Incidents that are not resolved.", &l, p.open_incidents as f64);
+            e.counter("sentinel_program_transactions_total", "Transactions observed since Sentinel started.", &l, p.total_tx as f64);
+            e.counter("sentinel_program_failed_transactions_total", "Failed transactions observed since Sentinel started.", &l, p.total_failed as f64);
+            if let Some(last) = p.last_tx_at {
+                e.gauge("sentinel_program_last_transaction_age_seconds", "Seconds since the program's last transaction.", &l, (Utc::now() - last).num_milliseconds().max(0) as f64 / 1000.0);
+            }
+            if let Some(h) = self.health(&p.program_id) {
+                if let Some(score) = h.score {
+                    e.gauge("sentinel_program_health_score", "Health check score, 0 to 100.", &l, score as f64);
+                }
+                for c in h.checks.iter().filter(|c| c.score.is_some()) {
+                    let cl = [("program", p.program_id.as_str()), ("label", p.label.as_str()), ("check", c.id)];
+                    e.gauge("sentinel_program_health_check_score", "Score of one health check, 0 to 100.", &cl, c.score.unwrap_or(0) as f64);
+                }
+            }
+        }
+
+        let mut by_severity: HashMap<(String, &'static str), u64> = HashMap::new();
+        {
+            let state = self.state.lock().unwrap();
+            for ps in state.programs.values() {
+                for open in ps.open.values() {
+                    let sev = match open.incident.severity {
+                        Severity::Low => "low",
+                        Severity::Medium => "medium",
+                        Severity::High => "high",
+                        Severity::Critical => "critical",
+                    };
+                    *by_severity.entry((ps.program.program_id.clone(), sev)).or_default() += 1;
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_severity.into_iter().collect();
+        rows.sort();
+        for ((program, severity), n) in rows {
+            e.gauge("sentinel_incidents_open", "Open incidents by program and severity.", &[("program", program.as_str()), ("severity", severity)], n as f64);
+        }
+        for ((channel, event, outcome), n) in self.dispatcher.delivery_stats() {
+            e.counter(
+                "sentinel_alert_deliveries_total",
+                "Alert and summary deliveries by channel, event and outcome.",
+                &[("channel", channel.as_str()), ("event", event.as_str()), ("outcome", outcome)],
+                n as f64,
+            );
+        }
+        e.gauge("sentinel_alert_rules", "Alert rules.", &[], self.state.lock().unwrap().rules.len() as f64);
+        e.finish()
+    }
+
     pub fn allow_private_webhooks(&self) -> bool {
         self.dispatcher.allow_private()
     }

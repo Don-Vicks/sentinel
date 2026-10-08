@@ -64,6 +64,8 @@ pub struct Dispatcher {
     /// The last delivery queued for each (rule, incident, channel). The next one
     /// waits for it, so an escalation never overtakes the message it replies to.
     chains: Arc<Mutex<HashMap<(i64, i64, usize), watch::Receiver<bool>>>>,
+    /// Deliveries by (channel, event, outcome), for /metrics.
+    stats: Arc<Mutex<HashMap<(String, String, &'static str), u64>>>,
 }
 
 fn is_public(ip: std::net::IpAddr) -> bool {
@@ -167,6 +169,13 @@ impl Dispatcher {
         self.allow_private
     }
 
+    /// Deliveries so far, by channel, event and whether they arrived.
+    pub fn delivery_stats(&self) -> Vec<((String, String, &'static str), u64)> {
+        let mut v: Vec<_> = self.stats.lock().unwrap().iter().map(|(k, n)| (k.clone(), *n)).collect();
+        v.sort();
+        v
+    }
+
     pub fn new(store: Arc<Store>, live: broadcast::Sender<Arc<LiveEvent>>) -> Self {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(5))
@@ -188,6 +197,7 @@ impl Dispatcher {
             telegram_api: env_or("SENTINEL_TELEGRAM_API", TELEGRAM_API).trim_end_matches('/').to_string(),
             pagerduty_api: env_or("SENTINEL_PAGERDUTY_API", PAGERDUTY_API),
             chains: Arc::default(),
+            stats: Arc::default(),
         }
     }
 
@@ -222,6 +232,12 @@ impl Dispatcher {
                     let _ = previous.wait_for(|finished| *finished).await;
                 }
                 let exec = this.deliver(&alert, idx, &channel).await;
+                *this
+                    .stats
+                    .lock()
+                    .unwrap()
+                    .entry((channel.label().to_string(), alert.event.as_str().to_string(), if exec.delivered { "delivered" } else { "failed" }))
+                    .or_default() += 1;
                 let _ = done.send(true);
                 match this.store.record_execution(exec) {
                     Ok(exec) => {

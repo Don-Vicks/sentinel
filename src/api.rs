@@ -81,6 +81,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/rules/{id}/test", post(test_rule))
         .route("/api/alerts", get(list_alerts))
         .route("/api/stream", get(stream))
+        .route("/metrics", get(metrics))
         .merge(crate::mcp::router())
         .layer(axum::middleware::from_fn_with_state(sentinel.clone(), crate::limits::rate_limit))
         .with_state(sentinel)
@@ -278,6 +279,17 @@ async fn program_posture(State(s): State<AppState>, Path(id): Path<String>) -> A
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, crate::redact::scrub(&e.to_string())))?;
     Ok(Json(json!(posture)))
+}
+
+/// Prometheus metrics. Set `SENTINEL_METRICS_TOKEN` to require `Authorization: Bearer <token>`.
+async fn metrics(State(s): State<AppState>, headers: axum::http::HeaderMap) -> Response {
+    if let Ok(want) = std::env::var("SENTINEL_METRICS_TOKEN") {
+        let given = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer "));
+        if !want.is_empty() && given != Some(want.as_str()) {
+            return (StatusCode::UNAUTHORIZED, [(header::WWW_AUTHENTICATE, "Bearer realm=\"sentinel-metrics\"")], "metrics need a bearer token").into_response();
+        }
+    }
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], s.metrics_text()).into_response()
 }
 
 /// The program's instructions with the accounts and arguments a rule can filter on.
