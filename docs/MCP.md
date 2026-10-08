@@ -45,6 +45,7 @@ Read (any token):
 | `explain_transaction` | Narrative, value flow, call tree and decoded instructions for any signature |
 | `get_posture` | Upgrade authority, single key or program-controlled, last deploy, risks |
 | `list_vaults` | Watched vaults with balances and net flow, plus candidates |
+| `list_dependencies` | Programs it calls, how often, and which are watched for upgrades |
 | `list_rules`, `list_deliveries` | Your rules (secrets masked) and what was delivered |
 
 Change (write token):
@@ -56,6 +57,8 @@ Change (write token):
 | `test_rule` | Send a test delivery through a rule |
 | `update_incident_status` | Mark an incident investigating or resolved |
 | `set_vaults` | Replace the vaults watched for drains |
+| `protect_program` | Create the usual rules (high-severity incidents, failure rate, admin call from a new wallet, health, feed problems) on the channels given or copied with `channels_from_rule`; rules you already have are left alone |
+| `mute_program` | Hold notifications for a program for a while (a deploy); incidents are still recorded. 0 minutes lifts it |
 | `send_summary_now` | Deliver a scheduled summary immediately |
 
 Programs can be named by address or by label (`"Pump.fun"`).
@@ -72,6 +75,10 @@ Prompts: `triage-incident` (diagnose, inspect example transactions, write up cau
 > "Triage incident 1002."
 > "Post-mortem for the last failure spike on Pump.fun, as markdown."
 > "Set up protection for this program, reusing my Telegram channel."
+
+## Agent skills
+
+Two ready-made skills use these tools: [`diagnose-incident`](skills/diagnose-incident/SKILL.md) and [`setup-protection`](skills/setup-protection/SKILL.md). Copy the folders into your agent's skills directory (for Claude Code, `.claude/skills/`).
 
 ## What it does not do
 

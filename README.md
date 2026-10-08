@@ -70,9 +70,18 @@ Failure rates and volume say how a program is behaving. These say what is being 
 - **Program upgrades and authority changes.** Sentinel reads the upgradeable loader's instructions, including ones a multisig executes through CPI, and opens an incident when a watched program is upgraded, its upgrade authority moves, it is made immutable or it is closed. The program page shows who can upgrade it now: a single wallet (flagged), a program-controlled authority such as a multisig, or nobody.
 - **Deploy correlation.** An incident that starts within 30 minutes of an upgrade carries it as evidence: "this began 74s after the program was upgraded", in the explanation, the alert and the post-mortem.
 - **Vault drains.** Name a program's treasury or vault accounts (Sentinel suggests likely ones from traffic) and it opens an incident when one loses a set share of its balance, or a set dollar amount, within ten minutes. Deposits offset withdrawals, so ordinary churn is not an incident.
+- **Alerts on what an instruction was asked to do.** Match a call by name (`withdraw`, `set_*|update_*`), by decoded arguments (`args.amount > 1000000000`), by named accounts (`accounts.authority = …`) or by signer, using the program's on-chain IDL. "First time this wallet has called it" turns the same rule into an admin-call-from-a-stranger alarm.
+- **Dependencies.** Sentinel learns which programs yours calls (oracles, AMMs, routers) from its call trees, watches the busiest for upgrades, and when trouble starts soon after one it says so: "began 74s after Jupiter, a program yours calls, was upgraded". Squads multisig upgrades are recognised and named, with the member who signed and how many signatures the multisig requires.
+- **One wallet taking over.** A fee payer that suddenly sends most of a program's traffic, well above that program's own norm, opens an incident. A program that is always mostly bots is left alone.
 - **Health check.** A 0-100 score from separate checks (failure rate against its baseline, open incidents, transactions arriving, compute, funds, decoding coverage, upgrade authority). Each states the rule it applied and the numbers it saw, and a check with nothing to judge says so instead of passing.
 - **Daily and weekly summaries.** What the program did: transactions and trend, success rate, unique wallets, value moved, largest transfers, top instructions and errors, incidents with time to detect and resolve, program changes, and what is worth doing next. Built from stored hourly rollups, so it survives restarts. Read it on the dashboard or schedule it to any chat channel.
 - **Post-mortems and diagnosis.** Any incident exports a markdown post-mortem, and a deterministic diagnosis names the likely cause, how confident that is and why, similar earlier incidents, and next steps. It is built only from recorded data.
+- **Telegram, both ways.** Incident messages carry an Acknowledge button, and the chat can ask `/status`, `/incidents`, `/health`, `/summary 7d`, `/mute 30m`, `/ack 1001`. Sentinel only answers chats a rule already sends to, and only about programs that rule's owner watches.
+- **Maintenance windows.** Mute a program for a deploy: notifications are held and the delivery log says "Held", incidents are still recorded, and a resolution is not sent for an incident nobody heard begin.
+- **Rules about Sentinel itself and about keepers.** Be told when the feed stalls or RPC keeps failing (and when it recovers), when the health score drops below a number, or when a wallet's SOL balance runs low.
+- **Warm start.** Add a program and Sentinel loads its last 15 minutes over RPC, so detectors have a baseline at once instead of after five minutes.
+- **One step to protect a program.** The usual rules (high-severity incidents, failure rate, admin calls from new wallets, health, feed problems) on the channel you choose, without duplicating any you have.
+- **A public status page and badge.** `/status/<program>` shows health, 7-day uptime and recent incidents to anyone; `/badge/<program>.svg` is a README badge. `/metrics` exposes everything to Prometheus.
 - **An MCP server** so an agent can use all of this. See [docs/MCP.md](docs/MCP.md).
 
 ## Built on Vortex
@@ -199,6 +208,8 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SENTINEL_AUTH_PER_MIN` / `SENTINEL_WRITES_PER_MIN` | `20` / `60` | Per-IP limits on sign-in requests and on everything that writes |
 | `SENTINEL_TRUST_PROXY` | — | `1` to take the client IP from `X-Forwarded-For` (behind a reverse proxy) |
 | `SENTINEL_MCP_PER_MIN` / `SENTINEL_MCP_WRITES_PER_MIN` | `120` / `20` | Per-token limits on MCP calls, and on the ones that change things |
+| `SENTINEL_METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>` |
+| `SENTINEL_CLUSTER` | `mainnet` | `devnet` or `testnet`: explorer links follow it and the dashboard shows a badge. What is streamed is decided by the endpoints you configure |
 | `SENTINEL_TELEGRAM_API` / `SENTINEL_PAGERDUTY_API` | official endpoints | Override where Telegram and PagerDuty deliveries go (tests and mocks) |
 | `SENTINEL_ALLOW_PRIVATE_WEBHOOKS` | — | `1` allows webhooks to private and loopback addresses (local dev only; blocked by default) |
 | `SENTINEL_SIMULATE` | — | **Dev only.** Program ID to feed with synthetic traffic instead of gRPC |
@@ -255,6 +266,13 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 | GET | `/api/programs/{id}/health` | 0-100 health score with each check |
 | GET | `/api/programs/{id}/summary?period=24h` | What the program did over `1h` to `30d` |
 | GET | `/api/programs/{id}/posture` | Upgrade authority and what it implies (needs `SOLANA_RPC_URL`) |
+| GET | `/api/programs/{id}/idl` | Instructions with the accounts and arguments a rule can filter on |
+| GET | `/api/programs/{id}/dependencies` | Programs it calls, how often, and which are watched for upgrades |
+| PUT | `/api/programs/{id}/mute` | `{minutes, reason?}` hold notifications for a maintenance window (0 lifts it) 🔒 |
+| POST | `/api/programs/{id}/protect` | `{channels}` or `{channels_from_rule}`: create the usual rules once 🔒 |
+| GET | `/api/public/status/{id}` | What the public status page shows (no sign-in) |
+| GET | `/badge/{id}.svg` | Health badge |
+| GET | `/metrics` | Prometheus text format |
 | GET/PUT | `/api/programs/{id}/vaults` | Vaults watched for drains, with balances and candidates / replace the list 🔒 |
 | GET/POST, PATCH/DELETE | `/api/summary-schedules`, `/api/summary-schedules/{id}` | Your scheduled summaries 🔒 |
 | POST | `/api/summary-schedules/{id}/send` | Send a summary now 🔒 |
@@ -335,7 +353,12 @@ cargo test
 - Instruction names come from logs (Anchor `Instruction: X`); arguments and account names need an on-chain Anchor IDL, which most major programs publish. Truncated logs lose names beyond the cut.
 - Metrics and recent transactions live in memory (15 min). Incidents and their transactions are persisted. Detector state resets on restart, and incidents left open are closed out.
 - Summaries are built from hourly rollups, kept for 35 days, so a period is counted in whole hours and starts from when Sentinel began watching. Unique wallets is an estimate (about 3% off). Value moved counts each hop of a multi-hop transaction and only tokens Blur prices as liquid.
-- Upgrades and authority changes are recognised from the upgradeable loader's instructions, directly or through CPI. Sentinel does not yet decode Squads' own instructions, so it can't say "3 of 5 approved". "Single key" versus "program-controlled" comes from whether the authority is a PDA, which can't tell a multisig from a DAO.
+- Upgrades and authority changes are recognised from the upgradeable loader's instructions, directly or through CPI. When a Squads v3 or v4 call executed it, the incident names the multisig and the member who signed, and (v4) reads how many signatures it requires. Sentinel does not follow proposals before they execute, so it can't say "3 of 5 have approved so far". Other governance programs (Realms, for example) are shown as a CPI without a name. "Single key" versus "program-controlled" comes from whether the authority is a PDA, which can't tell a multisig from a DAO unless Sentinel has watched it execute an upgrade.
+- Dependencies are learned from the call trees of transactions Sentinel sees, so a program called rarely may take a while to be tracked (it must be seen 5 times). Only the 8 busiest per program are watched for upgrades.
+- Instruction rules on arguments and accounts need the program's Anchor IDL. Without one they can still match names. "First time for this signer" learns who the regulars are during the first minutes after Sentinel starts watching, and remembers them in the database.
+- Backfill loads at most 1,500 transactions from the last 15 minutes, so on a very busy program it covers a few minutes. History opens no incidents.
+- Telegram commands use long polling per bot token; a token that already has a webhook set won't deliver updates to Sentinel.
+- A maintenance window holds opening and escalation notices and, for incidents whose start was held, the resolution. It does not stop incidents from being recorded.
 - Deploy correlation looks for an upgrade of the program in the 30 minutes before an incident began. It is evidence, not proof, and the diagnosis says how many signals agree.
 - Vault watching sees a vault only in transactions that also touch the monitored program. The vault list is shared by everyone watching the program.
 - The posture card and the health check's authority row need `SOLANA_RPC_URL`.
