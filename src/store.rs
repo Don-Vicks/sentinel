@@ -3,13 +3,17 @@
 //! incident points at, so investigations survive the in-memory window.
 //! Rows keep a few indexed columns and the full record as JSON.
 
-use crate::model::{AlertExecution, AlertRule, Incident, MonitoredProgram, TxSummary};
+use crate::model::{AlertExecution, AlertRule, ApiToken, Incident, MonitoredProgram, SummarySchedule, TxSummary};
+use crate::rollup::Rollup;
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use vortex::events::VortexTransaction;
+
+/// Hourly rollups are kept this long.
+const ROLLUP_RETENTION_SECS: i64 = 35 * 24 * 3600;
 
 pub struct Store {
     conn: Mutex<Connection>,
@@ -56,6 +60,43 @@ CREATE TABLE IF NOT EXISTS alert_executions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     rule_id INTEGER NOT NULL,
     data TEXT NOT NULL
+);
+-- The message a channel created for an incident, so updates and the resolution
+-- can reply to it (Telegram message id, ...).
+-- What a program did in each hour, for daily and weekly summaries.
+CREATE TABLE IF NOT EXISTS rollups (
+    program_id TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    PRIMARY KEY (program_id, hour)
+);
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token_hash TEXT NOT NULL UNIQUE,
+    account TEXT NOT NULL,
+    name TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
+-- Wallets that have called an instruction before, for "first time this signer" rules.
+CREATE TABLE IF NOT EXISTS signers_seen (
+    program_id TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (program_id, instruction, signer)
+);
+CREATE TABLE IF NOT EXISTS summary_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    data TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS delivery_refs (
+    rule_id INTEGER NOT NULL,
+    incident_id INTEGER NOT NULL,
+    channel INTEGER NOT NULL,
+    msg_ref TEXT NOT NULL,
+    PRIMARY KEY (rule_id, incident_id, channel)
 );
 "#;
 
@@ -114,6 +155,14 @@ impl Store {
         )?;
         removed += conn.execute(
             "DELETE FROM alert_executions WHERE id <= (SELECT MAX(id) FROM alert_executions) - 5000",
+            [],
+        )?;
+        removed += conn.execute(
+            "DELETE FROM rollups WHERE hour < ?1",
+            [chrono::Utc::now().timestamp() - ROLLUP_RETENTION_SECS],
+        )?;
+        removed += conn.execute(
+            "DELETE FROM delivery_refs WHERE incident_id NOT IN (SELECT id FROM incidents)",
             [],
         )?;
         let used = |c: &Connection| -> rusqlite::Result<i64> {
@@ -209,6 +258,83 @@ impl Store {
             .unwrap()
             .execute("DELETE FROM sessions WHERE token_hash = ?1", [token_hash])?;
         Ok(())
+    }
+
+    // --- signers seen ---
+
+    /// Records that `signer` called `instruction`. True when this is the first time.
+    pub fn mark_signer_seen(&self, program_id: &str, instruction: &str, signer: &str) -> Result<bool> {
+        let n = self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO signers_seen(program_id, instruction, signer, first_seen) VALUES (?1, ?2, ?3, ?4)",
+            params![program_id, instruction, signer, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n == 1)
+    }
+
+    // --- API tokens ---
+
+    pub fn create_api_token(&self, token_hash: &str, account: &str, name: &str, scope: &str) -> Result<ApiToken> {
+        let conn = self.conn.lock().unwrap();
+        let now = chrono::Utc::now();
+        conn.execute(
+            "INSERT INTO api_tokens(token_hash, account, name, scope, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![token_hash, account, name, scope, now.to_rfc3339()],
+        )?;
+        Ok(ApiToken {
+            id: conn.last_insert_rowid(),
+            account: account.into(),
+            name: name.into(),
+            scope: scope.into(),
+            created_at: now,
+            last_used_at: None,
+        })
+    }
+
+    pub fn api_tokens(&self, account: &str) -> Result<Vec<ApiToken>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, account, name, scope, created_at, last_used_at FROM api_tokens WHERE account = ?1 ORDER BY id",
+        )?;
+        let parse_time = |s: String| chrono::DateTime::parse_from_rfc3339(&s).map(|t| t.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
+        let rows = stmt.query_map([account], |r| {
+            Ok(ApiToken {
+                id: r.get(0)?,
+                account: r.get(1)?,
+                name: r.get(2)?,
+                scope: r.get(3)?,
+                created_at: parse_time(r.get(4)?),
+                last_used_at: r.get::<_, Option<String>>(5)?.map(parse_time),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_api_token(&self, account: &str, id: i64) -> Result<bool> {
+        let n = self
+            .conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM api_tokens WHERE id = ?1 AND account = ?2", params![id, account])?;
+        Ok(n > 0)
+    }
+
+    /// The token's id, account and scope; records that it was used.
+    pub fn api_token_lookup(&self, token_hash: &str) -> Result<Option<(i64, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let found: Option<(i64, String, String)> = conn
+            .query_row(
+                "SELECT id, account, scope FROM api_tokens WHERE token_hash = ?1",
+                [token_hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        if let Some((id, _, _)) = &found {
+            conn.execute(
+                "UPDATE api_tokens SET last_used_at = ?1 WHERE id = ?2",
+                params![chrono::Utc::now().to_rfc3339(), id],
+            )?;
+        }
+        Ok(found)
     }
 
     // --- watchlist ---
@@ -420,6 +546,95 @@ impl Store {
             params![serde_json::to_string(&exec)?, exec.id],
         )?;
         Ok(exec)
+    }
+
+    // --- summary schedules ---
+
+    pub fn create_schedule(&self, mut s: SummarySchedule) -> Result<SummarySchedule> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO summary_schedules(data) VALUES ('{}')", [])?;
+        s.id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE summary_schedules SET data = ?1 WHERE id = ?2",
+            params![serde_json::to_string(&s)?, s.id],
+        )?;
+        Ok(s)
+    }
+
+    pub fn update_schedule(&self, s: &SummarySchedule) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE summary_schedules SET data = ?1 WHERE id = ?2",
+            params![serde_json::to_string(s)?, s.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_schedule(&self, id: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute("DELETE FROM summary_schedules WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn schedules(&self) -> Result<Vec<SummarySchedule>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT data FROM summary_schedules ORDER BY id")?;
+        let rows = stmt.query_map([], |r| parse(r.get(0)?))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- rollups ---
+
+    pub fn put_rollup(&self, program_id: &str, hour: i64, rollup: &Rollup) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO rollups(program_id, hour, data) VALUES (?1, ?2, ?3)
+             ON CONFLICT(program_id, hour) DO UPDATE SET data = excluded.data",
+            params![program_id, hour, serde_json::to_string(rollup)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn rollup(&self, program_id: &str, hour: i64) -> Result<Option<Rollup>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT data FROM rollups WHERE program_id = ?1 AND hour = ?2",
+                params![program_id, hour],
+                |r| parse(r.get(0)?),
+            )
+            .optional()?)
+    }
+
+    /// Hourly rollups with `from <= hour < to` (unix seconds), oldest first.
+    pub fn rollups_between(&self, program_id: &str, from: i64, to: i64) -> Result<Vec<(i64, Rollup)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT hour, data FROM rollups WHERE program_id = ?1 AND hour >= ?2 AND hour < ?3 ORDER BY hour",
+        )?;
+        let rows = stmt.query_map(params![program_id, from, to], |r| Ok((r.get(0)?, parse(r.get(1)?)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delivery_ref(&self, rule_id: i64, incident_id: i64, channel: usize) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT msg_ref FROM delivery_refs WHERE rule_id = ?1 AND incident_id = ?2 AND channel = ?3",
+                params![rule_id, incident_id, channel as i64],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_delivery_ref(&self, rule_id: i64, incident_id: i64, channel: usize, msg_ref: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO delivery_refs(rule_id, incident_id, channel, msg_ref) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(rule_id, incident_id, channel) DO UPDATE SET msg_ref = excluded.msg_ref",
+            params![rule_id, incident_id, channel as i64, msg_ref],
+        )?;
+        Ok(())
     }
 
     pub fn executions_for(&self, owner: &str, limit: i64) -> Result<Vec<AlertExecution>> {

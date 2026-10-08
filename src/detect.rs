@@ -31,6 +31,55 @@ fn mins(secs: i64) -> String {
     }
 }
 
+/// One wallet sending most of the traffic, where that isn't how the program normally looks.
+/// Many programs are mostly bots, so the share must also be well above the program's own norm.
+pub fn concentration(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<(Detection, String)> {
+    if !cfg.concentration_enabled || !warmed_up(w, cfg, now) {
+        return None;
+    }
+    let (total, top) = w.top_signer(now, 60, 0);
+    let (wallet, count) = top?;
+    if total < cfg.concentration_min_tx as u64 {
+        return None;
+    }
+    let share = count as f64 * 100.0 / total as f64;
+    if share < cfg.concentration_share_pct {
+        return None;
+    }
+    // What is normal: the busiest wallet's share before this minute.
+    let base_span = (cfg.baseline_secs as i64).min(w.age(now));
+    let (base_total, base_top) = w.top_signer(now, base_span, 60);
+    let base_share = match base_top {
+        Some((_, c)) if base_total > 0 => c as f64 * 100.0 / base_total as f64,
+        _ => 0.0,
+    };
+    // Needs a real baseline, and a clear departure from it.
+    if base_total < cfg.concentration_min_tx as u64 || share < base_share + 25.0 {
+        return None;
+    }
+    let severity = if share >= 90.0 && total >= 5 * cfg.concentration_min_tx as u64 { Severity::High } else { Severity::Medium };
+    Some((
+        Detection {
+            kind: IncidentKind::BotActivity,
+            severity,
+            metric: "top_signer_share",
+            observed: share,
+            baseline: base_share,
+            threshold: cfg.concentration_share_pct.max(base_share + 25.0),
+            summary: format!("One wallet sent {share:.0}% of {total} transactions in the last minute (normally {base_share:.0}%)"),
+            explanation: format!(
+                "Wallet {wallet} was the fee payer of {count} of the last {total} transactions ({share:.0}%). Over the preceding {} the busiest wallet accounted for {base_share:.0}%. \
+                 Threshold: at least {:.0}% and 25 points above that. A single wallet driving most traffic can be a bot, your own keeper or an attack; \
+                 whether it also fails, or moves value, is in the linked transactions.",
+                mins(base_span - 60),
+                cfg.concentration_share_pct
+            ),
+            onset: Some(now - 60),
+        },
+        wallet,
+    ))
+}
+
 pub fn failure_spike(w: &Window, cfg: &DetectionConfig, now: i64) -> Option<Detection> {
     if !cfg.failure_enabled || !warmed_up(w, cfg, now) {
         return None;

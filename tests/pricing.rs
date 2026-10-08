@@ -158,6 +158,7 @@ async fn usd_large_transfer_detection_and_rule() {
             create_incident: true,
             severity: Severity::High,
             webhook_url: None,
+            channels: vec![],
             enabled: true,
             cooldown_secs: 0,
             created_at: Utc::now(),

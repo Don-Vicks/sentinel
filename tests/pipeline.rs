@@ -114,6 +114,7 @@ async fn failure_spike_becomes_incident_and_fires_webhook() {
             create_incident: false,
             severity: Severity::High,
             webhook_url: Some(format!("http://{addr}/hook")),
+            channels: vec![],
             enabled: true,
             cooldown_secs: 0,
             created_at: Utc::now(),

@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 import { api } from './api';
+import { setCluster } from './format';
 import { useLive } from './live';
 import type { ProgramSnapshot, SeriesPoint, StreamHealth } from './types';
 
@@ -34,9 +35,10 @@ export function ProgramsProvider({ children }: { children: ReactNode }) {
 
   const reload = useCallback(async () => {
     try {
-      const s = await api<{ programs: ProgramSnapshot[]; stream: StreamHealth; series: Record<string, SeriesPoint[]> }>(
+      const s = await api<{ programs: ProgramSnapshot[]; stream: StreamHealth; series: Record<string, SeriesPoint[]>; cluster?: string }>(
         '/api/status',
       );
+      setCluster(s.cluster);
       setPrograms(s.programs);
       setSeries(s.series ?? {});
       setStream(s.stream);

@@ -20,6 +20,8 @@ pub struct Limits {
     pub max_rules: usize,
     auth_per_min: u32,
     writes_per_min: u32,
+    mcp_per_min: u32,
+    mcp_writes_per_min: u32,
     admins: HashSet<String>,
     trust_proxy: bool,
     windows: Mutex<HashMap<(String, &'static str), (i64, u32)>>,
@@ -32,6 +34,8 @@ impl Limits {
             max_rules: env_usize("SENTINEL_MAX_RULES", 25),
             auth_per_min: env_usize("SENTINEL_AUTH_PER_MIN", 20) as u32,
             writes_per_min: env_usize("SENTINEL_WRITES_PER_MIN", 60) as u32,
+            mcp_per_min: env_usize("SENTINEL_MCP_PER_MIN", 120) as u32,
+            mcp_writes_per_min: env_usize("SENTINEL_MCP_WRITES_PER_MIN", 20) as u32,
             admins: std::env::var("SENTINEL_ADMINS")
                 .unwrap_or_default()
                 .split(',')
@@ -61,6 +65,16 @@ impl Limits {
         }
         entry.1 += 1;
         entry.1 <= per_min
+    }
+
+    /// Agent calls are limited per token: reads and (more tightly) writes.
+    pub fn allow_mcp(&self, token_id: i64, write: bool) -> bool {
+        let key = format!("token:{token_id}");
+        if write {
+            self.allow(&key, "mcp-write", self.mcp_writes_per_min)
+        } else {
+            self.allow(&key, "mcp", self.mcp_per_min)
+        }
     }
 
     fn client(&self, req: &Request) -> String {

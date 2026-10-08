@@ -13,6 +13,10 @@ path = "src/lib.rs"
 name = "sentinel"
 path = "src/main.rs"
 
+[[bin]]
+name = "sentinel-mcp"
+path = "src/bin/sentinel-mcp.rs"
+
 [dependencies]
 vortex = { package = "solana-vortex", git = "https://github.com/Don-Vicks/vortex", branch = "master" }
 tokio = { version = "1", features = ["full"] }

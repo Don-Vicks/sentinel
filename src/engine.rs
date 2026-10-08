@@ -2,7 +2,7 @@
 //! metrics per program, runs detectors and alert rules once a second, and
 //! turns what fires into incidents linked to the transactions behind them.
 
-use crate::alerts::{Alert, Dispatcher};
+use crate::alerts::{Alert, AlertEvent, Dispatcher};
 use crate::analyze::{fingerprint_with, summarize, symbol_for};
 use crate::idl::IdlRegistry;
 use crate::detect::{self, Detection};
@@ -46,12 +46,30 @@ pub struct Sentinel {
     pub beam: crate::beam::BeamClient,
     /// The chain tip according to RPC, and when it was read; the stream's freshness is judged against it.
     chain_tip: Mutex<(u64, i64)>,
+    /// RPC polls that failed in a row.
+    rpc_failures: std::sync::atomic::AtomicU32,
+    /// Programs waiting for their recent history to be loaded, and the ones already done.
+    backfill_queue: tokio::sync::mpsc::UnboundedSender<String>,
+    backfill_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    backfilled: Mutex<HashSet<String>>,
+    /// Multisigs whose settings should be read for an incident, (incident id, multisig address).
+    enrich_queue: tokio::sync::mpsc::UnboundedSender<(i64, String)>,
+    enrich_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(i64, String)>>>,
     /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
+    /// Who can upgrade each program, read from chain and kept for a few minutes.
+    postures: Mutex<HashMap<String, (std::time::Instant, crate::posture::Posture)>>,
+    /// (program, instruction, signer) combinations already recorded as seen.
+    seen_signers: Mutex<HashSet<String>>,
+    /// Incidents whose opening notice was held by a maintenance window, so their end is held too.
+    held_incidents: Mutex<HashSet<i64>>,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
+    /// Which cluster this instance watches: mainnet (default), devnet or testnet. It sets the
+    /// explorer links; the endpoints you configure decide what is actually streamed.
+    pub cluster: &'static str,
     dispatcher: Dispatcher,
     writer: Writer,
     state: Mutex<State>,
@@ -73,10 +91,35 @@ struct State {
     /// Detectors stay paused until this time after a stall, while the gap washes out of the windows.
     hold_until: i64,
     stalled: bool,
+    /// Which system problems have been announced and not yet resolved, and when each last was.
+    system_open: HashSet<SystemKind>,
+    system_last: HashMap<SystemKind, i64>,
+    /// The dependency accounts last sent to the stream's filter.
+    dep_filter: Vec<String>,
 }
 
 /// Seconds without the chain tip advancing before the feed counts as stalled.
 const STALL_SECS: i64 = 15;
+/// How long after an upgrade a new incident is attributed to it.
+const DEPLOY_WINDOW_SECS: i64 = 30 * 60;
+/// How far back history is loaded, and the most transactions fetched, and the time allowed.
+const BACKFILL_SECS: i64 = 900;
+const BACKFILL_MAX_TX: usize = 1500;
+const BACKFILL_BUDGET_SECS: u64 = 40;
+
+/// What loading a program's recent history found.
+#[derive(Debug, Clone, Copy)]
+pub struct BackfillReport {
+    pub transactions: usize,
+    /// Span of time the history covers.
+    pub seconds: i64,
+}
+/// RPC polls (every 5 seconds) that must fail in a row before it is announced.
+const RPC_FAILURES_BEFORE_ALERT: u32 = 3;
+/// Least time between two announcements of the same system problem.
+const SYSTEM_MIN_GAP_SECS: i64 = 120;
+/// How often the open hour's rollup is written to disk.
+const ROLLUP_FLUSH_SECS: i64 = 30;
 /// Seconds detectors stay paused after the feed comes back.
 const RESUME_GRACE_SECS: i64 = 90;
 
@@ -94,6 +137,73 @@ struct ProgramState {
     /// Accounts watching this program ("system" for startup programs).
     watchers: HashSet<String>,
     last_tx_at: Option<DateTime<Utc>>,
+    /// Incident changes (opened, escalated, resolved) waiting to be turned into
+    /// alerts by the rules that follow incidents.
+    lifecycle: Vec<(AlertEvent, Incident)>,
+    /// The program's code account, whose changes mean an upgrade or a new authority.
+    programdata: Option<String>,
+    /// The hour being summed up (unix seconds at its start) and what has happened in it.
+    rollup: Option<(i64, crate::rollup::Rollup)>,
+    rollup_flushed: i64,
+    /// Recent balance movements of the watched vaults.
+    vaults: HashMap<String, VaultState>,
+    /// Programs this one calls (CPI), from the call trees of its transactions.
+    deps: HashMap<String, DepStat>,
+    /// The latest decoded program events, newest first.
+    events: VecDeque<EventRecord>,
+}
+
+const RECENT_EVENTS: usize = 200;
+
+/// A decoded program event, as shown on the dashboard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventRecord {
+    pub at: DateTime<Utc>,
+    pub signature: String,
+    pub name: String,
+    pub fields: serde_json::Value,
+}
+
+#[derive(Default, Clone)]
+struct DepStat {
+    calls: u64,
+    failed: u64,
+    last_at: i64,
+}
+
+/// Dependencies watched for upgrades: the busiest few, once they have been seen a few times.
+const MAX_WATCHED_DEPS: usize = 8;
+const MIN_DEP_CALLS: u64 = 5;
+
+fn watched_dependencies(ps: &ProgramState) -> Vec<String> {
+    let mut deps: Vec<_> = ps.deps.iter().filter(|(_, d)| d.calls >= MIN_DEP_CALLS).collect();
+    deps.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then(a.0.cmp(b.0)));
+    deps.into_iter().take(MAX_WATCHED_DEPS).map(|(k, _)| k.clone()).collect()
+}
+
+fn dependency_label(program_id: &str) -> String {
+    vortex::events::programs::known_name(program_id)
+        .map(str::to_string)
+        .or_else(|| crate::catalog::name_of(program_id).map(str::to_string))
+        .unwrap_or_else(|| crate::analyze::short(program_id))
+}
+
+#[derive(Default)]
+struct VaultState {
+    mint: Option<String>,
+    /// Balance after the latest transaction that touched it, in whole tokens (or SOL).
+    balance: Option<f64>,
+    /// (second, change) within the drain window.
+    flows: VecDeque<(i64, f64)>,
+}
+
+struct Drain {
+    vault: String,
+    mint: Option<String>,
+    outflow: f64,
+    balance_after: f64,
+    pct: f64,
+    usd: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -105,6 +215,8 @@ enum LinkFilter {
     Fingerprint(String),
     /// Linked explicitly by whoever raised the incident.
     Manual,
+    /// Transactions paid for by one wallet.
+    Signer(String),
 }
 
 impl LinkFilter {
@@ -115,6 +227,7 @@ impl LinkFilter {
             LinkFilter::All => true,
             LinkFilter::Fingerprint(fp) => summary.fingerprint.as_deref() == Some(fp.as_str()),
             LinkFilter::Manual => false,
+            LinkFilter::Signer(w) => summary.fee_payer.as_deref() == Some(w.as_str()),
         }
     }
 }
@@ -135,16 +248,23 @@ struct OpenIncident {
 impl ProgramState {
     fn new(program: MonitoredProgram) -> Self {
         Self {
+            programdata: crate::posture::programdata_address(&program.program_id),
+            rollup: None,
+            rollup_flushed: 0,
+            vaults: HashMap::new(),
+            deps: HashMap::new(),
             program,
             window: Window::default(),
             recent: VecDeque::new(),
             recent_full: VecDeque::new(),
+            events: VecDeque::new(),
             fingerprints: HashMap::new(),
             fingerprint_first_seen: HashMap::new(),
             open: HashMap::new(),
             pending_feed: Vec::new(),
             rule_firing: HashMap::new(),
             rule_last_fired: HashMap::new(),
+            lifecycle: Vec::new(),
             watchers: HashSet::new(),
             last_tx_at: None,
         }
@@ -194,6 +314,8 @@ impl Sentinel {
             ps.watchers.insert(SYSTEM.to_string());
         }
         let idls = IdlRegistry::new(rpc.clone());
+        let (backfill_queue, backfill_inbox) = tokio::sync::mpsc::unbounded_channel();
+        let (enrich_queue, enrich_inbox) = tokio::sync::mpsc::unbounded_channel();
         let auth = crate::auth::Auth::new(store.clone(), &public_url);
         let store_for_writer = store.clone();
         let this = Arc::new(Self {
@@ -204,12 +326,26 @@ impl Sentinel {
             idls,
             beam: crate::beam::BeamClient::new(),
             chain_tip: Mutex::new((0, 0)),
+            rpc_failures: std::sync::atomic::AtomicU32::new(0),
+            backfill_queue,
+            backfill_inbox: Mutex::new(Some(backfill_inbox)),
+            backfilled: Mutex::new(HashSet::new()),
+            enrich_queue,
+            enrich_inbox: Mutex::new(Some(enrich_inbox)),
             rpc_txs: Mutex::new(HashMap::new()),
+            postures: Mutex::new(HashMap::new()),
+            seen_signers: Mutex::new(HashSet::new()),
+            held_incidents: Mutex::new(HashSet::new()),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
             live,
             public_url,
+            cluster: match std::env::var("SENTINEL_CLUSTER").unwrap_or_default().to_lowercase().as_str() {
+                "devnet" => "devnet",
+                "testnet" => "testnet",
+                _ => "mainnet",
+            },
             dispatcher,
             writer: Writer::spawn(store_for_writer),
             state: Mutex::new(state),
@@ -234,10 +370,61 @@ impl Sentinel {
             let this = self.clone();
             tokio::spawn(async move {
                 loop {
-                    if let Ok(slot) = rpc.get_slot_with_commitment(solana_sdk::commitment_config::CommitmentConfig::processed()).await {
-                        *this.chain_tip.lock().unwrap() = (slot, Utc::now().timestamp());
+                    match rpc.get_slot_with_commitment(solana_sdk::commitment_config::CommitmentConfig::processed()).await {
+                        Ok(slot) => {
+                            *this.chain_tip.lock().unwrap() = (slot, Utc::now().timestamp());
+                            this.rpc_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            this.rpc_failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                }
+            });
+        }
+        // Answer commands and button taps from the Telegram chats that receive alerts.
+        tokio::spawn(crate::telegram::run(self.clone()));
+        // Read the settings of a multisig that executed an upgrade, to say how many must sign.
+        if self.rpc.is_some() {
+            if let Some(mut inbox) = self.enrich_inbox.lock().unwrap().take() {
+                let this = self.clone();
+                tokio::spawn(async move {
+                    while let Some((incident, multisig)) = inbox.recv().await {
+                        if let Err(e) = this.enrich_multisig(incident, &multisig).await {
+                            tracing::debug!(incident, %multisig, error = %e, "could not read the multisig");
+                        }
+                    }
+                });
+            }
+        }
+        // Load each program's recent history so detectors have a baseline from the first minute.
+        if self.rpc.is_some() {
+            if let Some(mut inbox) = self.backfill_inbox.lock().unwrap().take() {
+                for id in self.state.lock().unwrap().programs.keys() {
+                    let _ = self.backfill_queue.send(id.clone());
+                }
+                let this = self.clone();
+                tokio::spawn(async move {
+                    while let Some(program) = inbox.recv().await {
+                        if !this.backfilled.lock().unwrap().insert(program.clone()) {
+                            continue;
+                        }
+                        match this.backfill(&program).await {
+                            Ok(report) => tracing::info!(%program, transactions = report.transactions, seconds = report.seconds, "loaded recent history"),
+                            Err(e) => tracing::warn!(%program, error = %e, "could not load recent history"),
+                        }
+                    }
+                });
+            }
+        }
+        // Scheduled summaries go out at their hour, a minute's resolution is plenty.
+        {
+            let this = self.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    this.send_due_summaries(Utc::now());
                 }
             });
         }
@@ -260,7 +447,17 @@ impl Sentinel {
     }
 
     fn sync_filters(&self) {
-        let ids: Vec<String> = self.state.lock().unwrap().programs.keys().cloned().collect();
+        let (mut ids, deps): (Vec<String>, Vec<String>) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.programs.keys().cloned().collect(),
+                state.programs.values().flat_map(watched_dependencies).collect(),
+            )
+        };
+        // Authority changes touch the ProgramData account, not the program, so stream those too,
+        // and the code accounts of the programs these ones depend on.
+        let data: Vec<String> = ids.iter().chain(deps.iter()).filter_map(|p| crate::posture::programdata_address(p)).collect();
+        ids.extend(data);
         self.source.watch_programs(ids);
     }
 
@@ -294,9 +491,37 @@ impl Sentinel {
         let mut alerts = Vec::new();
         let rules = state.rules.clone();
         let mut noted = false;
+        let loader_call = tx.instructions.iter().any(|ix| ix.program_id == crate::resolve::UPGRADEABLE_LOADER);
         for ps in state.programs.values_mut() {
             let pid = ps.program.program_id.clone();
-            if !tx.touches(&pid) {
+            // A program this one calls was upgraded or changed hands.
+            if loader_call && ps.program.detection.authority_enabled {
+                for dep in watched_dependencies(ps) {
+                    let Some(code) = crate::posture::programdata_address(&dep) else { continue };
+                    for event in crate::posture::detect(&tx, &dep, &code) {
+                        let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+                        self.dependency_incident(ps, &tx, &summary, event, second);
+                    }
+                }
+            }
+            let touches_program = tx.touches(&pid);
+            let touches_code = ps.programdata.as_deref().is_some_and(|d| tx.touches(d));
+            if !touches_program && !touches_code {
+                continue;
+            }
+            if ps.program.detection.authority_enabled {
+                if let Some(code) = ps.programdata.clone() {
+                    for event in crate::posture::detect(&tx, &pid, &code) {
+                        let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+                        self.authority_incident(ps, &tx, &summary, event, second);
+                    }
+                }
+            }
+            // A transaction that only touches the code account (a SetAuthority) is not traffic.
+            if !touches_program {
+                for (event, inc) in std::mem::take(&mut ps.lifecycle) {
+                    alerts.extend(self.incident_alerts(&rules, ps, &inc, event));
+                }
                 continue;
             }
             if !noted {
@@ -330,17 +555,39 @@ impl Sentinel {
                 names.push("(unnamed)".into());
             }
             ps.window.record_instructions(second, &names, tx.success, summary.compute_units);
+            self.record_rollup(ps, &tx, &summary, fp.as_ref(), &names, second);
             ps.last_tx_at = Some(tx.received_at);
+            // Which programs does this one call?
+            let mut called: Vec<&str> = tx
+                .invocations
+                .iter()
+                .filter(|i| i.depth >= 2 && i.program_id != pid && !crate::resolve::INFRA.contains(&i.program_id.as_str()))
+                .map(|i| i.program_id.as_str())
+                .collect();
+            called.sort_unstable();
+            called.dedup();
+            for dep in called {
+                if !ps.deps.contains_key(dep) && ps.deps.len() >= 64 {
+                    continue;
+                }
+                let stat = ps.deps.entry(dep.to_string()).or_default();
+                stat.calls += 1;
+                stat.failed += (!tx.success) as u64;
+                stat.last_at = second;
+            }
             ps.recent.push_front(summary.clone());
             ps.recent.truncate(RECENT_SUMMARIES);
             ps.recent_full.push_front((tx.clone(), summary.clone()));
             ps.recent_full.truncate(RECENT_FULL);
+            self.note_events(ps, &tx);
             ps.pending_feed.push(summary.clone());
 
             let keys: Vec<String> = ps.open.keys().cloned().collect();
             for key in keys {
                 self.maybe_link(ps, &key, &tx, &summary, second);
             }
+
+            self.vault_flows(ps, &tx, &summary, second);
 
             if ps.program.detection.transfer_enabled {
                 if let Some(big) = large_transfer(&tx, &ps.program.detection, &self.prices) {
@@ -369,6 +616,21 @@ impl Sentinel {
                         alerts.extend(self.fire_rule(ps, rule, msg, t.amount, LinkFilter::Manual, true, second, Some((&tx, &summary))));
                     }
                 }
+                if matches!(rule.condition, Condition::Instruction { .. }) {
+                    alerts.extend(self.instruction_rule(ps, rule, &tx, &summary, second));
+                }
+                if matches!(rule.condition, Condition::Event { .. }) {
+                    alerts.extend(self.event_rule(ps, rule, &tx, &summary, second));
+                }
+                if let Condition::WalletBalance { account, below_sol } = &rule.condition {
+                    if let Some(a) = tx.accounts.iter().find(|a| &a.pubkey == account) {
+                        let balance = a.post_lamports as f64 / 1e9;
+                        if balance < *below_sol {
+                            let msg = format!("Wallet {} holds {:.4} SOL after {}, below the {} SOL you set", short_sig(account), balance, short_sig(&tx.signature), below_sol);
+                            alerts.extend(self.fire_rule(ps, rule, msg, balance, LinkFilter::Manual, true, second, Some((&tx, &summary))));
+                        }
+                    }
+                }
                 if let Condition::TransferUsd { min_usd } = &rule.condition {
                     let best = tx
                         .transfers
@@ -393,11 +655,12 @@ impl Sentinel {
                     }
                 }
             }
+            for (event, inc) in std::mem::take(&mut ps.lifecycle) {
+                alerts.extend(self.incident_alerts(&rules, ps, &inc, event));
+            }
         }
         drop(guard);
-        for a in alerts {
-            self.dispatcher.dispatch(a);
-        }
+        self.send_alerts(alerts);
     }
 
     fn maybe_link(
@@ -440,9 +703,41 @@ impl Sentinel {
         }
         state.stalled = stalled;
         let paused = now < state.hold_until;
+        let stalled_now = state.stalled;
+
+        // The stream follows the programs these ones call, so their upgrades are seen too.
+        let mut resync_filters = false;
+        if now % 30 == 0 {
+            let mut deps: Vec<String> = state.programs.values().flat_map(watched_dependencies).collect();
+            deps.sort();
+            deps.dedup();
+            if deps != state.dep_filter {
+                state.dep_filter = deps;
+                resync_filters = true;
+            }
+        }
+
+        // Tell the people whose rules ask for it when Sentinel can't see, and when it can again.
+        let rpc_failing = self.rpc.is_some() && self.rpc_failures.load(std::sync::atomic::Ordering::Relaxed) >= RPC_FAILURES_BEFORE_ALERT;
+        for (kind, active) in [(SystemKind::FeedStalled, stalled), (SystemKind::RpcFailing, rpc_failing)] {
+            let announced = state.system_open.contains(&kind);
+            if active && !announced {
+                // A flapping feed shouldn't page every few seconds.
+                if state.system_last.get(&kind).is_some_and(|t| now - t < SYSTEM_MIN_GAP_SECS) {
+                    continue;
+                }
+                state.system_open.insert(kind);
+                state.system_last.insert(kind, now);
+                alerts.extend(self.system_alerts(&rules, &state.programs, kind, true));
+            } else if !active && announced {
+                state.system_open.remove(&kind);
+                alerts.extend(self.system_alerts(&rules, &state.programs, kind, false));
+            }
+        }
 
         for ps in state.programs.values_mut() {
             ps.window.advance(now);
+            self.tick_rollup(ps, now);
             if paused {
                 use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
                 ps.window.flag(now, 2, ANOMALY_FAILURE | ANOMALY_ACTIVITY | ANOMALY_COMPUTE);
@@ -485,11 +780,20 @@ impl Sentinel {
                 let key = kind.as_str().to_string();
                 match detection {
                     Some(d) => {
-                        if let Some(opened) = self.on_detection(ps, &key, d, None, now) {
-                            alerts.extend(self.incident_rules(&rules, ps, &opened));
-                        }
+                        self.on_detection(ps, &key, d, None, now);
                     }
                     None => self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64),
+                }
+            }
+
+            // One wallet suddenly sending most of the traffic.
+            if now % 5 == 0 {
+                const KEY: &str = "bot_activity";
+                match detect::concentration(&ps.window, &cfg, now) {
+                    Some((d, wallet)) => {
+                        self.on_detection(ps, KEY, d, Some(LinkFilter::Signer(wallet)), now);
+                    }
+                    None => self.on_quiet(ps, KEY, now, cfg.resolve_after_secs as i64),
                 }
             }
 
@@ -531,7 +835,6 @@ impl Sentinel {
                             open.dirty = true;
                         }
                     }
-                    alerts.extend(self.incident_rules(&rules, ps, &opened));
                 }
             }
             let quiet: Vec<String> = ps
@@ -595,6 +898,46 @@ impl Sentinel {
                 }
             }
 
+            // The health score: sampled each minute for the summary, and judged every 15 seconds
+            // for rules that want to know when it drops.
+            if now % 15 == 0 {
+                let wants_health = applicable.iter().any(|r| matches!(r.condition, Condition::Health { .. }));
+                if wants_health || now % 60 == 0 {
+                    let health = self.health_of(ps, stalled_now, now);
+                    if let Some(score) = health.score {
+                        if now % 60 == 0 {
+                            if let Some((_, rollup)) = ps.rollup.as_mut() {
+                                rollup.note_health(score);
+                            }
+                        }
+                        for rule in &applicable {
+                            let Condition::Health { below } = &rule.condition else { continue };
+                            let hit = score < *below;
+                            let was = ps.rule_firing.insert(rule.id, hit).unwrap_or(false);
+                            let key = format!("rule:{}", rule.id);
+                            if hit && !was {
+                                let worst = health
+                                    .checks
+                                    .iter()
+                                    .filter(|c| c.score.is_some())
+                                    .min_by_key(|c| c.score.unwrap_or(100))
+                                    .map(|c| format!(". Weakest check, {}: {}", c.label, c.detail))
+                                    .unwrap_or_default();
+                                let msg = format!("Health score {score} (below {below}){worst}");
+                                alerts.extend(self.fire_rule(ps, rule, msg, score as f64, LinkFilter::All, false, now, None));
+                            } else if hit {
+                                if let Some(open) = ps.open.get_mut(&key) {
+                                    open.quiet_since = None;
+                                    open.incident.observed = Some(score as f64);
+                                }
+                            } else {
+                                self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Event-driven incidents close once things go quiet.
             let stale: Vec<String> = ps
                 .open
@@ -604,6 +947,10 @@ impl Sentinel {
                 .collect();
             for key in stale {
                 self.resolve(ps, &key, now);
+            }
+
+            for (event, inc) in std::mem::take(&mut ps.lifecycle) {
+                alerts.extend(self.incident_alerts(&rules, ps, &inc, event));
             }
 
             // Persist and publish incidents that changed this tick.
@@ -630,9 +977,10 @@ impl Sentinel {
             self.emit(LiveEvent::Stream { health });
         }
         drop(guard);
-        for a in alerts {
-            self.dispatcher.dispatch(a);
+        if resync_filters {
+            self.sync_filters();
         }
+        self.send_alerts(alerts);
     }
 
     /// Opens or refreshes the incident for a firing detector. Returns the
@@ -659,6 +1007,7 @@ impl Sentinel {
             if d.severity > inc.severity {
                 inc.severity = d.severity;
                 open.dirty = true;
+                ps.lifecycle.push((AlertEvent::Updated, inc.clone()));
             }
             return None;
         }
@@ -709,6 +1058,17 @@ impl Sentinel {
         backfill_since: i64,
         now: i64,
     ) -> Option<Incident> {
+        let mut incident = incident;
+        // A problem that starts soon after the program's code changed is probably that change.
+        if incident.kind != IncidentKind::AuthorityChange {
+            let onset = incident.onset_at.unwrap_or(incident.detected_at);
+            if let Some(deploy) = self.correlate_deploy(&incident.program_id, onset) {
+                if let Some(note) = deploy["note"].as_str() {
+                    incident.explanation = format!("{} {note}", incident.explanation);
+                }
+                incident.evidence["deploy"] = deploy;
+            }
+        }
         let incident = match self.store.create_incident(incident) {
             Ok(i) => i,
             Err(e) => {
@@ -742,6 +1102,7 @@ impl Sentinel {
         let _ = self.store.update_incident(&open.incident);
         let opened = open.incident.clone();
         tracing::info!(id = opened.id, kind = ?opened.kind, program = %opened.program_id, "incident opened");
+        ps.lifecycle.push((AlertEvent::Opened, opened.clone()));
         self.emit(LiveEvent::Incident {
             change: IncidentChange::Opened,
             incident: Box::new(opened.clone()),
@@ -778,10 +1139,739 @@ impl Sentinel {
         inc.updated_at = Utc::now();
         let _ = self.store.update_incident(inc);
         tracing::info!(id = inc.id, "incident resolved");
+        ps.lifecycle.push((AlertEvent::Resolved, inc.clone()));
         self.emit(LiveEvent::Incident {
             change: IncidentChange::Resolved,
             incident: Box::new(inc.clone()),
         });
+    }
+
+    /// Watches the configured vaults for a net outflow that is large for them or large in value.
+    fn vault_flows(&self, ps: &mut ProgramState, tx: &Arc<VortexTransaction>, summary: &TxSummary, second: i64) {
+        let cfg = ps.program.detection.clone();
+        if !cfg.drain_enabled || cfg.vaults.is_empty() || !tx.success {
+            return;
+        }
+        for vault in &cfg.vaults {
+            let change = tx
+                .token_balances
+                .iter()
+                .find(|b| &b.account == vault)
+                .map(|b| (Some(b.mint.clone()), b.pre, b.post))
+                .or_else(|| {
+                    tx.accounts
+                        .iter()
+                        .find(|a| &a.pubkey == vault)
+                        .map(|a| (None, a.pre_lamports as f64 / 1e9, a.post_lamports as f64 / 1e9))
+                });
+            let Some((mint, pre, post)) = change else { continue };
+            let delta = post - pre;
+            if delta == 0.0 {
+                continue;
+            }
+            let price = self.prices.get(mint.as_deref()).filter(|p| p.trusted()).map(|p| p.usd);
+            if let (Some((_, rollup)), Some(p)) = (ps.rollup.as_mut(), price) {
+                rollup.vault_net_usd += delta * p;
+            }
+            let state = ps.vaults.entry(vault.clone()).or_default();
+            state.mint = mint.clone();
+            state.balance = Some(post);
+            state.flows.push_back((second, delta));
+            while state.flows.front().is_some_and(|(t, _)| second - t > cfg.drain_window_secs as i64) {
+                state.flows.pop_front();
+            }
+            let net: f64 = state.flows.iter().map(|(_, d)| d).sum();
+            if net >= 0.0 {
+                continue;
+            }
+            let outflow = -net;
+            let before = post + outflow;
+            let pct = if before > 0.0 { outflow * 100.0 / before } else { 100.0 };
+            let usd = price.map(|p| p * outflow);
+            let large_share = pct >= cfg.drain_pct && usd.is_none_or(|u| u >= cfg.drain_min_usd);
+            let large_value = usd.zip(cfg.drain_usd).is_some_and(|(u, t)| u >= t);
+            if large_share || large_value {
+                let drain = Drain { vault: vault.clone(), mint, outflow, balance_after: post, pct, usd };
+                self.vault_drain_incident(ps, tx, summary, drain, second);
+            }
+        }
+    }
+
+    fn vault_drain_incident(&self, ps: &mut ProgramState, tx: &Arc<VortexTransaction>, summary: &TxSummary, d: Drain, second: i64) {
+        let key = format!("{}:{}", IncidentKind::VaultDrain.as_str(), d.vault);
+        let symbol = symbol_for(d.mint.as_deref());
+        let worth = d.usd.map(|u| format!(" (${})", fmt_amount(u))).unwrap_or_default();
+        let summary_text = format!(
+            "{} {symbol}{worth} left vault {}, {:.0}% of its balance",
+            fmt_amount(d.outflow),
+            short_sig(&d.vault),
+            d.pct
+        );
+        if let Some(open) = ps.open.get_mut(&key) {
+            link_tx(&self.writer, open, tx, summary, second);
+            open.last_event = second;
+            let value = d.usd.unwrap_or(d.pct);
+            if open.incident.peak.is_none_or(|p| value > p) {
+                open.incident.peak = Some(value);
+                open.incident.summary = summary_text;
+                open.incident.evidence["vault"] = vault_evidence(&d, &symbol);
+            }
+            open.incident.observed = Some(d.usd.unwrap_or(d.pct));
+            return;
+        }
+        let cfg = &ps.program.detection;
+        let severity = match (d.pct, d.usd.unwrap_or(0.0)) {
+            (p, u) if p >= 50.0 || u >= 1_000_000.0 => Severity::Critical,
+            (p, u) if p >= 25.0 || u >= 250_000.0 => Severity::High,
+            _ => Severity::Medium,
+        };
+        let incident = Incident {
+            id: 0,
+            program_id: ps.program.program_id.clone(),
+            kind: IncidentKind::VaultDrain,
+            severity,
+            status: IncidentStatus::Open,
+            title: format!("Vault outflow · {}", ps.program.label),
+            summary: summary_text,
+            explanation: format!(
+                "Net outflow from vault {} was {:.4} {symbol}{worth} within {} minutes, leaving {:.4}. \
+                 That is {:.1}% of what it held, against the {:.0}% threshold{}. Further outflow is grouped here until the vault is quiet for {} minutes.",
+                d.vault,
+                d.outflow,
+                cfg.drain_window_secs / 60,
+                d.balance_after,
+                d.pct,
+                cfg.drain_pct,
+                cfg.drain_usd.map(|u| format!(" or ${}", fmt_amount(u))).unwrap_or_default(),
+                EVENT_INCIDENT_QUIET_SECS / 60
+            ),
+            source: "detector".into(),
+            metric: Some("vault_outflow_pct".into()),
+            observed: Some(d.pct),
+            peak: Some(d.usd.unwrap_or(d.pct)),
+            baseline: None,
+            threshold: Some(cfg.drain_pct),
+            onset_at: Some(tx.received_at),
+            detected_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+            detection_latency_ms: Some((Utc::now() - tx.received_at).num_milliseconds().max(0)),
+            affected_count: 0,
+            affected_wallets: 0,
+            evidence: json!({ "vault": vault_evidence(&d, &symbol) }),
+        };
+        if self.open_incident(ps, &key, incident, LinkFilter::Manual, true, i64::MAX, second).is_some() {
+            if let Some(open) = ps.open.get_mut(&key) {
+                link_tx(&self.writer, open, tx, summary, second);
+                open.dirty = true;
+            }
+        }
+    }
+
+    /// The watched vaults with their last known balance and recent net flow.
+    pub fn vault_status(&self, program_id: &str) -> Option<serde_json::Value> {
+        let state = self.state.lock().unwrap();
+        let ps = state.programs.get(program_id)?;
+        let window = ps.program.detection.drain_window_secs as i64;
+        let now = Utc::now().timestamp();
+        let vaults: Vec<_> = ps
+            .program
+            .detection
+            .vaults
+            .iter()
+            .map(|account| {
+                let v = ps.vaults.get(account);
+                let mint = v.and_then(|v| v.mint.clone());
+                let net: f64 = v.map(|v| v.flows.iter().filter(|(t, _)| now - t <= window).map(|(_, d)| d).sum()).unwrap_or(0.0);
+                let price = self.prices.get(mint.as_deref()).filter(|p| p.trusted()).map(|p| p.usd);
+                json!({
+                    "account": account,
+                    "mint": mint,
+                    "symbol": v.map(|v| symbol_for(v.mint.as_deref())),
+                    "balance": v.and_then(|v| v.balance),
+                    "balance_usd": v.and_then(|v| v.balance).zip(price).map(|(b, p)| b * p),
+                    "net_window": net,
+                    "seen": v.is_some(),
+                })
+            })
+            .collect();
+        // Accounts that move funds in many transactions but whose owner never signs look like vaults.
+        let mut seen: HashMap<String, (u32, Option<String>, f64)> = HashMap::new();
+        for (tx, _) in ps.recent_full.iter().filter(|(t, _)| t.success) {
+            let signers: HashSet<&str> = tx.signers().collect();
+            for b in tx.token_balances.iter().filter(|b| b.delta != 0.0) {
+                if b.owner.as_deref().is_some_and(|o| signers.contains(o)) {
+                    continue;
+                }
+                let e = seen.entry(b.account.clone()).or_insert((0, Some(b.mint.clone()), 0.0));
+                e.0 += 1;
+                e.2 += b.delta.abs();
+            }
+        }
+        let mut candidates: Vec<_> = seen
+            .into_iter()
+            .filter(|(a, (n, _, _))| *n >= 5 && !ps.program.detection.vaults.contains(a))
+            .collect();
+        candidates.sort_by(|a, b| b.1 .0.cmp(&a.1 .0).then(b.1 .2.total_cmp(&a.1 .2)));
+        let candidates: Vec<_> = candidates
+            .into_iter()
+            .take(5)
+            .map(|(account, (n, mint, _))| json!({ "account": account, "mint": mint, "symbol": symbol_for(mint.as_deref()), "transactions": n }))
+            .collect();
+        Some(json!({ "vaults": vaults, "candidates": candidates, "window_secs": window }))
+    }
+
+    pub fn set_vaults(&self, program_id: &str, vaults: Vec<String>) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        let Some(ps) = state.programs.get_mut(program_id) else { bail!("program not monitored") };
+        ps.program.detection.vaults = vaults;
+        let keep: HashSet<_> = ps.program.detection.vaults.iter().cloned().collect();
+        ps.vaults.retain(|k, _| keep.contains(k));
+        self.store.upsert_program(&ps.program)?;
+        Ok(())
+    }
+
+    /// True the first time `signer` is seen calling `instruction` on `program`.
+    fn note_signer(&self, program: &str, instruction: &str, signer: &str) -> bool {
+        let key = format!("{program}|{}|{signer}", crate::instruction_rule::normalize(instruction));
+        let mut seen = self.seen_signers.lock().unwrap();
+        if seen.contains(&key) {
+            return false;
+        }
+        if seen.len() >= 200_000 {
+            seen.clear();
+        }
+        seen.insert(key);
+        drop(seen);
+        // A database that can't be written is treated as "seen": better silent than a flood.
+        self.store
+            .mark_signer_seen(program, &crate::instruction_rule::normalize(instruction), signer)
+            .unwrap_or(false)
+    }
+
+    /// Matches an instruction rule against the transaction; the alert, if it fires.
+    #[allow(clippy::too_many_arguments)]
+    fn instruction_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        use crate::instruction_rule as ir;
+        let Condition::Instruction { name, program_id, filters, match_mode, success_only, first_seen_signer } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        let target = program_id.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| ps.program.program_id.clone());
+        if !tx.touches(&target) {
+            return None;
+        }
+        let idl = self.idls.cached(&target);
+        if idl.is_none() {
+            self.idls.request(&target);
+        }
+        let needs_args = filters.iter().any(|f| f.path.starts_with("args") || f.path.starts_with("accounts"));
+        let warmed = ps.window.age(second) >= ps.program.detection.warmup_secs as i64;
+        for call in ir::calls(tx, &target, idl.as_deref()) {
+            if !ir::name_matches(name, &call.name) {
+                continue;
+            }
+            // Without the IDL the arguments are unknown, so a rule about them can't be judged yet.
+            if needs_args && !call.decoded {
+                continue;
+            }
+            let signer = tx.fee_payer().unwrap_or_default().to_string();
+            if *first_seen_signer {
+                let new = self.note_signer(&target, &call.name, &signer);
+                // Right after start-up everyone looks new; learn who they are first.
+                if !new || !warmed {
+                    continue;
+                }
+            }
+            let Some(seen) = ir::filters_hold(&call.root, filters, *match_mode) else { continue };
+            let label = if call.name.is_empty() { "instruction".to_string() } else { call.name.clone() };
+            let msg = format!(
+                "{label} called by {} in {}{}{}",
+                short_sig(&signer),
+                short_sig(&tx.signature),
+                if seen.is_empty() { String::new() } else { format!(" ({})", seen.join(", ")) },
+                if *first_seen_signer { ", the first time this wallet has called it" } else { "" }
+            );
+            let value = ir::headline_value(&call.root, filters);
+            return self.fire_rule(ps, rule, msg, value, LinkFilter::Manual, true, second, Some((tx, summary)));
+        }
+        None
+    }
+
+    /// Matches an event rule against the events the transaction emitted; the alert, if it fires.
+    fn event_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        use crate::instruction_rule as ir;
+        let Condition::Event { name, program_id, filters, match_mode, success_only } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        let target = program_id.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| ps.program.program_id.clone());
+        if !tx.touches(&target) {
+            return None;
+        }
+        let Some(idl) = self.idls.cached(&target) else {
+            self.idls.request(&target);
+            return None;
+        };
+        for ev in crate::events::emitted(tx, &target, &idl) {
+            if !ir::name_matches(name, &ev.name) {
+                continue;
+            }
+            let Some(seen) = ir::filters_hold(&ev.root, filters, *match_mode) else { continue };
+            let msg = format!(
+                "{} emitted in {}{}",
+                ev.name,
+                short_sig(&tx.signature),
+                if seen.is_empty() { String::new() } else { format!(" ({})", seen.join(", ").replace("fields.", "")) }
+            );
+            let value = ir::headline_value(&ev.root, filters);
+            return self.fire_rule(ps, rule, msg, value, LinkFilter::Manual, true, second, Some((tx, summary)));
+        }
+        None
+    }
+
+    /// Keeps the program's latest decoded events for the dashboard.
+    fn note_events(&self, ps: &mut ProgramState, tx: &VortexTransaction) {
+        if !tx.success || !crate::events::may_carry(tx) {
+            return;
+        }
+        let Some(idl) = self.idls.cached(&ps.program.program_id) else { return };
+        for ev in crate::events::emitted(tx, &ps.program.program_id, &idl) {
+            ps.events.push_front(EventRecord { at: tx.received_at, signature: tx.signature.clone(), name: ev.name, fields: ev.fields });
+        }
+        ps.events.truncate(RECENT_EVENTS);
+    }
+
+    /// Adds one transaction to the hour's rollup, starting a new hour when needed.
+    fn record_rollup(
+        &self,
+        ps: &mut ProgramState,
+        tx: &VortexTransaction,
+        summary: &TxSummary,
+        fp: Option<&Fingerprint>,
+        names: &[String],
+        second: i64,
+    ) {
+        let hour = second - second.rem_euclid(3600);
+        self.roll_hour(ps, hour);
+        let Some((_, rollup)) = ps.rollup.as_mut() else { return };
+        let (mut usd, mut sol) = (0.0, 0.0);
+        if tx.success {
+            for t in tx.transfers.iter().filter(|t| matches!(t.kind, TransferKind::Sol | TransferKind::Token)) {
+                if matches!(t.kind, TransferKind::Sol) {
+                    sol += t.amount;
+                }
+                if let Some(p) = self.prices.get(t.mint.as_deref()).filter(|p| p.trusted()) {
+                    usd += p.usd * t.amount;
+                }
+            }
+        }
+        let error = fp.map(|f| {
+            let key = f.key();
+            let label = if rollup.errors.contains_key(&key) {
+                String::new()
+            } else {
+                describe_fingerprint(Some(f), &key, &program_labels_one(&ps.program))
+            };
+            (key, label)
+        });
+        let big = summary.largest_transfer.as_ref().map(|l| crate::rollup::BigMove {
+            signature: tx.signature.clone(),
+            at: second,
+            amount: l.amount,
+            symbol: l.symbol.clone(),
+            usd: l.usd,
+        });
+        rollup.record(crate::rollup::Observation {
+            ok: tx.success,
+            fee: tx.fee,
+            compute_units: summary.compute_units,
+            signer: tx.fee_payer(),
+            instructions: names,
+            error: error.as_ref().map(|(k, l)| (k.as_str(), l.as_str())),
+            usd,
+            sol,
+            big,
+        });
+    }
+
+    /// Makes `hour` the current rollup: saves the previous hour and resumes any stored copy of this one.
+    fn roll_hour(&self, ps: &mut ProgramState, hour: i64) {
+        if ps.rollup.as_ref().is_some_and(|(h, _)| *h == hour) {
+            return;
+        }
+        let pid = ps.program.program_id.clone();
+        if let Some((old_hour, old)) = ps.rollup.take() {
+            if let Err(e) = self.store.put_rollup(&pid, old_hour, &old) {
+                tracing::warn!(error = %e, "failed to save hourly rollup");
+            }
+        }
+        let resumed = self.store.rollup(&pid, hour).ok().flatten().unwrap_or_default();
+        ps.rollup = Some((hour, resumed));
+        ps.rollup_flushed = 0;
+    }
+
+    /// Notes the last full second's rate and saves the open hour now and then.
+    fn tick_rollup(&self, ps: &mut ProgramState, now: i64) {
+        let Some((hour, rollup)) = ps.rollup.as_mut() else { return };
+        let tps = ps.window.stats(now, 1, 0).tx as f64;
+        rollup.note_tps(tps, now - 1);
+        if now - ps.rollup_flushed >= ROLLUP_FLUSH_SECS {
+            ps.rollup_flushed = now;
+            if let Err(e) = self.store.put_rollup(&ps.program.program_id, *hour, rollup) {
+                tracing::warn!(error = %e, "failed to save hourly rollup");
+            }
+        }
+    }
+
+    /// The most recent upgrade of `program_id` shortly before `onset`, as evidence for an incident.
+    fn correlate_deploy(&self, program_id: &str, onset: DateTime<Utc>) -> Option<serde_json::Value> {
+        let recent = self.store.incidents(Some(program_id), 100).ok()?;
+        let (deploy, at, delay) = recent
+            .into_iter()
+            .filter(|i| matches!(i.kind, IncidentKind::AuthorityChange | IncidentKind::DependencyChange) && i.evidence["authority"]["action"] == "upgrade")
+            .filter_map(|i| {
+                let at = i.onset_at.unwrap_or(i.detected_at);
+                let delay = (onset - at).num_seconds();
+                (-5..=DEPLOY_WINDOW_SECS).contains(&delay).then_some((i, at, delay))
+            })
+            .min_by_key(|(_, _, delay)| delay.abs())?;
+        let signature = deploy.evidence["authority"]["signature"].as_str().unwrap_or_default().to_string();
+        let dependency = (deploy.kind == IncidentKind::DependencyChange).then(|| deploy.evidence["dependency"]["label"].as_str().unwrap_or("a dependency").to_string());
+        let after = match delay.max(0) {
+            0..=89 => format!("{}s", delay.max(0)),
+            90..=5399 => format!("{}m", delay / 60),
+            _ => format!("{:.1}h", delay as f64 / 3600.0),
+        };
+        Some(json!({
+            "incident_id": deploy.id,
+            "signature": signature,
+            "at": at,
+            "slot": deploy.evidence["authority"]["slot"],
+            "authority": deploy.evidence["authority"]["authority"],
+            "seconds_before": delay.max(0),
+            "dependency": dependency,
+            "note": match &dependency {
+                Some(label) => format!(
+                    "This began {after} after {label}, a program yours calls, was upgraded (transaction {}, incident #{}), so that change is the first suspect.",
+                    short_sig(&signature),
+                    deploy.id
+                ),
+                None => format!(
+                    "This began {after} after the program was upgraded (transaction {}, incident #{}), so the new code is the first suspect.",
+                    short_sig(&signature),
+                    deploy.id
+                ),
+            },
+        }))
+    }
+
+    /// Alerts for rules that watch for Sentinel itself being blind. They go to the owners of
+    /// rules, provided the owner watches at least one program (or the rule predates accounts).
+    fn system_alerts(&self, rules: &[AlertRule], programs: &HashMap<String, ProgramState>, kind: SystemKind, active: bool) -> Vec<Alert> {
+        let message = match (kind, active) {
+            (SystemKind::FeedStalled, true) => "No new chain slots have arrived for over 15 seconds. Sentinel is blind, so detectors are paused and quiet programs are not being reported as down.".to_string(),
+            (SystemKind::FeedStalled, false) => "The feed is moving again. Detectors resume after a short grace period.".to_string(),
+            (SystemKind::RpcFailing, true) => "Several RPC calls in a row have failed. Owner labels, IDL loading, transaction lookups and the chain-tip check are affected.".to_string(),
+            (SystemKind::RpcFailing, false) => "RPC calls are succeeding again.".to_string(),
+        };
+        let event = if active { AlertEvent::Opened } else { AlertEvent::Resolved };
+        rules
+            .iter()
+            .filter(|r| r.enabled && r.has_targets())
+            .filter(|r| matches!(&r.condition, Condition::System { kinds } if kinds.is_empty() || kinds.contains(&kind)))
+            .filter(|r| r.owner.as_deref().is_none_or(|o| programs.values().any(|ps| ps.watchers.contains(o))))
+            .map(|rule| Alert {
+                rule: rule.clone(),
+                program_id: "sentinel".into(),
+                program_label: "Sentinel".into(),
+                message: format!("{}: {message}", kind.title()),
+                incident_id: None,
+                severity: Severity::High,
+                event,
+                payload: json!({
+                    "event": "sentinel.system",
+                    "system": kind,
+                    "active": active,
+                    "rule": { "id": rule.id, "name": rule.name },
+                    "severity": Severity::High,
+                    "program": { "id": "sentinel", "label": "Sentinel" },
+                    "message": message,
+                    "links": { "incident": self.public_url.trim_end_matches('/') },
+                }),
+            })
+            .collect()
+    }
+
+    /// A program the monitored one calls was upgraded, changed hands or closed.
+    fn dependency_incident(
+        &self,
+        ps: &mut ProgramState,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        event: crate::posture::AuthorityEvent,
+        second: i64,
+    ) {
+        use crate::posture::Action;
+        let key = format!("{}:{}:{}", IncidentKind::DependencyChange.as_str(), tx.signature, event.path);
+        if ps.open.contains_key(&key) {
+            return;
+        }
+        let label = dependency_label(&event.program_id);
+        let severity = match &event.action {
+            Action::Close { .. } => Severity::Critical,
+            Action::SetAuthority { new_authority: Some(_) } => Severity::High,
+            Action::Upgrade { .. } => Severity::Medium,
+            _ => Severity::Low,
+        };
+        let calls = ps.deps.get(&event.program_id).map(|d| d.calls).unwrap_or(0);
+        let incident = Incident {
+            id: 0,
+            program_id: ps.program.program_id.clone(),
+            kind: IncidentKind::DependencyChange,
+            severity,
+            status: IncidentStatus::Open,
+            title: format!("{} · {}", event.headline().replace("Program", &label), ps.program.label),
+            summary: format!("{label}, which {} calls, changed: {}", ps.program.label, event.summary()),
+            explanation: format!(
+                "{} is called by {} ({calls} calls seen). {} If failures follow, the cause may be there and not in your own code.",
+                label,
+                ps.program.label,
+                event.explanation()
+            ),
+            source: "detector".into(),
+            metric: Some("dependency".into()),
+            observed: None,
+            peak: None,
+            baseline: None,
+            threshold: None,
+            onset_at: Some(tx.received_at),
+            detected_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+            detection_latency_ms: Some((Utc::now() - tx.received_at).num_milliseconds().max(0)),
+            affected_count: 0,
+            affected_wallets: 0,
+            evidence: json!({ "authority": event, "dependency": { "program_id": event.program_id, "label": label, "calls_seen": calls } }),
+        };
+        if self.open_incident(ps, &key, incident, LinkFilter::Manual, true, i64::MAX, second).is_some() {
+            if let Some(open) = ps.open.get_mut(&key) {
+                link_tx(&self.writer, open, tx, summary, second);
+                open.dirty = true;
+            }
+        }
+    }
+
+    /// The programs this one calls, busiest first, with how often and whether they are watched.
+    /// The program's latest decoded events, newest first.
+    pub fn recent_events(&self, program_id: &str, limit: usize) -> Vec<EventRecord> {
+        let state = self.state.lock().unwrap();
+        state.programs.get(program_id).map(|ps| ps.events.iter().take(limit).cloned().collect()).unwrap_or_default()
+    }
+
+    pub fn dependencies(&self, program_id: &str) -> Option<serde_json::Value> {
+        let state = self.state.lock().unwrap();
+        let ps = state.programs.get(program_id)?;
+        let watched: HashSet<String> = watched_dependencies(ps).into_iter().collect();
+        let total: u64 = ps.deps.values().map(|d| d.calls).sum::<u64>().max(1);
+        let mut rows: Vec<_> = ps.deps.iter().collect();
+        rows.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then(a.0.cmp(b.0)));
+        let list: Vec<_> = rows
+            .into_iter()
+            .take(20)
+            .map(|(id, d)| {
+                json!({
+                    "program_id": id,
+                    "label": dependency_label(id),
+                    "calls": d.calls,
+                    "failed": d.failed,
+                    "share": d.calls as f64 / total as f64,
+                    "last_seen": ts(d.last_at),
+                    "watched_for_upgrades": watched.contains(id),
+                })
+            })
+            .collect();
+        Some(json!({ "dependencies": list }))
+    }
+
+    /// An upgrade, authority change or closure of the monitored program itself.
+    fn authority_incident(
+        &self,
+        ps: &mut ProgramState,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        event: crate::posture::AuthorityEvent,
+        second: i64,
+    ) {
+        let key = format!("{}:{}:{}", IncidentKind::AuthorityChange.as_str(), tx.signature, event.path);
+        if ps.open.contains_key(&key) {
+            return;
+        }
+        let incident = Incident {
+            id: 0,
+            program_id: ps.program.program_id.clone(),
+            kind: IncidentKind::AuthorityChange,
+            severity: event.severity(),
+            status: IncidentStatus::Open,
+            title: format!("{} · {}", event.headline(), ps.program.label),
+            summary: event.summary(),
+            explanation: event.explanation(),
+            source: "detector".into(),
+            metric: Some("authority".into()),
+            observed: None,
+            peak: None,
+            baseline: None,
+            threshold: None,
+            onset_at: Some(tx.received_at),
+            detected_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+            detection_latency_ms: Some((Utc::now() - tx.received_at).num_milliseconds().max(0)),
+            affected_count: 0,
+            affected_wallets: 0,
+            evidence: json!({ "authority": event }),
+        };
+        if self
+            .open_incident(ps, &key, incident, LinkFilter::Manual, true, i64::MAX, second)
+            .is_some()
+        {
+            if let Some(open) = ps.open.get_mut(&key) {
+                link_tx(&self.writer, open, tx, summary, second);
+                open.dirty = true;
+                if let Some(via) = &event.via {
+                    let _ = self.enrich_queue.send((open.incident.id, via.multisig.clone()));
+                }
+            }
+        }
+    }
+
+    /// Delivers alerts, except opening and escalation notices for programs in a maintenance
+    /// window. Those are logged as held, so it is clear why nothing arrived. A resolution
+    /// still goes out: whoever was told about a problem should hear it is over.
+    fn send_alerts(&self, alerts: Vec<Alert>) {
+        if alerts.is_empty() {
+            return;
+        }
+        let now = Utc::now();
+        let muted: HashMap<String, DateTime<Utc>> = {
+            let state = self.state.lock().unwrap();
+            state
+                .programs
+                .values()
+                .filter(|ps| ps.program.is_muted(now))
+                .filter_map(|ps| ps.program.muted_until.map(|t| (ps.program.program_id.clone(), t)))
+                .collect()
+        };
+        for alert in alerts {
+            let muted_until = muted.get(&alert.program_id).copied();
+            let mut held_ids = self.held_incidents.lock().unwrap();
+            // Held: an opening or escalation in a maintenance window, and the end of one whose
+            // start was held (nobody heard it begin, so nobody needs to hear it end).
+            let hold: Option<DateTime<Utc>> = match (alert.event, alert.incident_id) {
+                (AlertEvent::Opened | AlertEvent::Updated, Some(id)) if muted_until.is_some() => {
+                    held_ids.insert(id);
+                    muted_until
+                }
+                (AlertEvent::Opened | AlertEvent::Updated, None) => muted_until,
+                (AlertEvent::Resolved, Some(id)) if held_ids.remove(&id) => Some(muted_until.unwrap_or(now)),
+                _ => None,
+            };
+            drop(held_ids);
+            match hold {
+                Some(until) => {
+                    let exec = AlertExecution {
+                        id: 0,
+                        owner: alert.rule.owner.clone(),
+                        rule_id: alert.rule.id,
+                        rule_name: alert.rule.name.clone(),
+                        program_id: alert.program_id.clone(),
+                        fired_at: now,
+                        message: alert.message.clone(),
+                        incident_id: alert.incident_id,
+                        webhook_url: Some("held".into()),
+                        channel: None,
+                        event: Some(alert.event.as_str().to_string()),
+                        delivered: false,
+                        status_code: None,
+                        error: Some(format!("Held: alerts for this program are muted until {} UTC", until.format("%H:%M"))),
+                        latency_ms: None,
+                        attempts: 0,
+                    };
+                    if let Ok(exec) = self.store.record_execution(exec) {
+                        self.emit(LiveEvent::Alert { execution: exec });
+                    }
+                }
+                None => self.dispatcher.dispatch(alert),
+            }
+        }
+    }
+
+    /// Mutes (or, with 0 minutes, unmutes) notifications for a program, e.g. during a deploy.
+    pub fn set_mute(&self, program_id: &str, minutes: u32, reason: Option<String>) -> Result<MonitoredProgram> {
+        let mut state = self.state.lock().unwrap();
+        let Some(ps) = state.programs.get_mut(program_id) else { bail!("program not monitored") };
+        if minutes == 0 {
+            ps.program.muted_until = None;
+            ps.program.mute_reason = None;
+        } else {
+            ps.program.muted_until = Some(Utc::now() + chrono::Duration::minutes(minutes.min(7 * 24 * 60) as i64));
+            ps.program.mute_reason = reason.map(|r| r.trim().chars().take(120).collect()).filter(|r: &String| !r.is_empty());
+        }
+        self.store.upsert_program(&ps.program)?;
+        Ok(ps.program.clone())
+    }
+
+    /// Adds what a multisig requires (3 of 5 signatures) to the incident its execution opened.
+    pub async fn enrich_multisig(&self, incident_id: i64, multisig: &str) -> Result<()> {
+        let Some(rpc) = &self.rpc else { return Ok(()) };
+        let Some(info) = crate::squads::fetch_multisig(rpc, multisig).await? else { return Ok(()) };
+        let apply = |inc: &mut Incident| {
+            if inc.evidence["authority"].get("multisig").is_some_and(|m| !m.is_null()) {
+                return false;
+            }
+            inc.evidence["authority"]["multisig"] = json!(info);
+            inc.summary = format!("{} ({})", inc.summary, info.describe());
+            inc.explanation = format!("{} The multisig needs {} to act.", inc.explanation, info.describe());
+            inc.updated_at = Utc::now();
+            true
+        };
+        {
+            let mut state = self.state.lock().unwrap();
+            for ps in state.programs.values_mut() {
+                if let Some(open) = ps.open.values_mut().find(|o| o.incident.id == incident_id) {
+                    if apply(&mut open.incident) {
+                        open.dirty = true;
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        // Already closed: update the stored record.
+        if let Some(mut inc) = self.store.incident(incident_id)? {
+            if apply(&mut inc) {
+                self.store.update_incident(&inc)?;
+                self.emit(LiveEvent::Incident { change: IncidentChange::Updated, incident: Box::new(inc) });
+            }
+        }
+        Ok(())
     }
 
     fn large_transfer_incident(
@@ -895,7 +1985,12 @@ impl Sentinel {
                 Condition::Metric { value, window_secs, .. } => (Some(*value), *window_secs as i64),
                 Condition::Transfer { min_amount, .. } => (Some(*min_amount), 60),
                 Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
-                Condition::Incident { .. } => (None, 60),
+                Condition::Incident { .. }
+                | Condition::Instruction { .. }
+                | Condition::Event { .. }
+                | Condition::System { .. }
+                | Condition::Health { .. }
+                | Condition::WalletBalance { .. } => (None, 60),
             };
             let incident = Incident {
                 id: 0,
@@ -940,8 +2035,12 @@ impl Sentinel {
 
         ps.rule_last_fired.insert(rule.id, now);
         self.mark_rule_fired(rule.id);
-        rule.webhook_url.as_ref()?;
+        if !rule.has_targets() {
+            return None;
+        }
         Some(Alert {
+            severity: rule.severity,
+            event: AlertEvent::Opened,
             rule: rule.clone(),
             program_id: ps.program.program_id.clone(),
             program_label: ps.program.label.clone(),
@@ -962,33 +2061,52 @@ impl Sentinel {
         })
     }
 
-    /// Webhook deliveries for rules that watch for incidents.
-    fn incident_rules(&self, rules: &[AlertRule], ps: &ProgramState, incident: &Incident) -> Vec<Alert> {
+    /// Alerts for an incident change, for every rule that follows it: rules
+    /// watching incidents of this kind and severity, and (for escalation and
+    /// resolution) the rule that opened the incident in the first place.
+    fn incident_alerts(&self, rules: &[AlertRule], ps: &ProgramState, incident: &Incident, event: AlertEvent) -> Vec<Alert> {
         let mut out = Vec::new();
         for rule in rules.iter().filter(|r| applies(r, &ps.program.program_id, &ps.watchers)) {
-            let Condition::Incident { kinds, min_severity } = &rule.condition else { continue };
-            if incident.severity < *min_severity || (!kinds.is_empty() && !kinds.contains(&incident.kind)) {
+            let follows = match &rule.condition {
+                Condition::Incident { kinds, min_severity } => {
+                    incident.severity >= *min_severity && (kinds.is_empty() || kinds.contains(&incident.kind))
+                }
+                _ => event != AlertEvent::Opened && incident.source == format!("rule:{}", rule.id),
+            };
+            if !follows || !rule.has_targets() {
                 continue;
             }
-            if rule.webhook_url.is_none() {
-                continue;
+            if event == AlertEvent::Opened {
+                self.mark_rule_fired(rule.id);
             }
-            self.mark_rule_fired(rule.id);
+            let (name, message) = match event {
+                AlertEvent::Opened | AlertEvent::Test | AlertEvent::Summary => (
+                    "sentinel.incident",
+                    format!("Incident #{} ({:?}): {}", incident.id, incident.severity, incident.summary),
+                ),
+                AlertEvent::Updated => (
+                    "sentinel.incident.updated",
+                    format!("Incident #{} escalated to {:?}: {}", incident.id, incident.severity, incident.summary),
+                ),
+                AlertEvent::Resolved => (
+                    "sentinel.incident.resolved",
+                    format!("Incident #{} resolved{}: {}", incident.id, resolved_after(incident), incident.summary),
+                ),
+            };
             out.push(Alert {
                 rule: rule.clone(),
                 program_id: ps.program.program_id.clone(),
                 program_label: ps.program.label.clone(),
-                message: format!(
-                    "Incident #{} ({:?}): {}",
-                    incident.id, incident.severity, incident.summary
-                ),
+                message: message.clone(),
                 incident_id: Some(incident.id),
+                severity: incident.severity,
+                event,
                 payload: json!({
-                    "event": "sentinel.incident",
+                    "event": name,
                     "rule": { "id": rule.id, "name": rule.name },
                     "severity": incident.severity,
                     "program": { "id": ps.program.program_id, "label": ps.program.label },
-                    "message": incident.summary,
+                    "message": message,
                     "incident": incident,
                     "links": { "incident": self.incident_link(incident.id) },
                 }),
@@ -1068,6 +2186,87 @@ impl Sentinel {
     /// Waits for queued incident-transaction writes to reach SQLite.
     pub fn flush(&self) {
         self.writer.flush();
+    }
+
+    /// Everything worth graphing, in Prometheus text format.
+    pub fn metrics_text(&self) -> String {
+        use crate::prom::Exposition;
+        let mut e = Exposition::default();
+        let stream = self.stream_health();
+        e.gauge("sentinel_up", "Sentinel is running.", &[], 1.0);
+        e.gauge("sentinel_uptime_seconds", "Seconds since Sentinel started streaming.", &[], stream.uptime_secs as f64);
+        e.gauge("sentinel_stream_connected", "1 while the transaction stream is connected and moving.", &[("transport", stream.transport)], stream.connected as u8 as f64);
+        e.gauge("sentinel_stream_stalled", "1 while the chain tip has stopped advancing and detectors are paused.", &[], stream.stalled as u8 as f64);
+        e.gauge("sentinel_ingest_tps", "Transactions per second entering Sentinel.", &[], stream.ingest_tps);
+        e.gauge("sentinel_stream_slot_lag", "Slots between the chain tip seen on the stream and the newest transaction.", &[], stream.slot_lag as f64);
+        if let Some(behind) = stream.behind_chain_slots {
+            e.gauge("sentinel_stream_behind_chain_slots", "Slots the stream is behind the chain tip read over RPC.", &[], behind as f64);
+        }
+        if let Some(ms) = stream.last_transaction_age_ms {
+            e.gauge("sentinel_stream_last_transaction_age_seconds", "Seconds since the last transaction arrived.", &[], ms as f64 / 1000.0);
+        }
+        e.counter("sentinel_transactions_received_total", "Transactions received from the stream.", &[], stream.transactions_received as f64);
+        e.counter("sentinel_transactions_dropped_total", "Transactions missed because Sentinel fell behind.", &[], stream.dropped as f64);
+        e.gauge("sentinel_idls_loaded", "Programs whose Anchor IDL is loaded.", &[], self.idls.loaded() as f64);
+        e.gauge("sentinel_priced_tokens", "Tokens priced through Blur.", &[], stream.pricing.priced_mints as f64);
+
+        for p in self.programs() {
+            let l = [("program", p.program_id.as_str()), ("label", p.label.as_str())];
+            e.gauge("sentinel_program_tps", "Transactions per second over the last 10 seconds.", &l, p.tps_10s);
+            e.gauge("sentinel_program_transactions_60s", "Transactions in the last minute.", &l, p.tx_60s as f64);
+            e.gauge("sentinel_program_failure_rate_percent", "Percent of transactions failing over the last minute.", &l, p.failure_rate_60s);
+            e.gauge("sentinel_program_baseline_failure_rate_percent", "The program's normal failure rate.", &l, p.baseline_failure_rate);
+            e.gauge("sentinel_program_avg_compute_units", "Average compute units per transaction over the last minute.", &l, p.avg_cu_60s);
+            e.gauge("sentinel_program_unique_signers_60s", "Distinct fee payers in the last minute.", &l, p.unique_signers_60s as f64);
+            e.gauge("sentinel_program_open_incidents", "Incidents that are not resolved.", &l, p.open_incidents as f64);
+            let muted = self.state.lock().unwrap().programs.get(&p.program_id).is_some_and(|ps| ps.program.is_muted(Utc::now()));
+            e.gauge("sentinel_program_muted", "1 while notifications for the program are held (a maintenance window).", &l, muted as u8 as f64);
+            e.counter("sentinel_program_transactions_total", "Transactions observed since Sentinel started.", &l, p.total_tx as f64);
+            e.counter("sentinel_program_failed_transactions_total", "Failed transactions observed since Sentinel started.", &l, p.total_failed as f64);
+            if let Some(last) = p.last_tx_at {
+                e.gauge("sentinel_program_last_transaction_age_seconds", "Seconds since the program's last transaction.", &l, (Utc::now() - last).num_milliseconds().max(0) as f64 / 1000.0);
+            }
+            if let Some(h) = self.health(&p.program_id) {
+                if let Some(score) = h.score {
+                    e.gauge("sentinel_program_health_score", "Health check score, 0 to 100.", &l, score as f64);
+                }
+                for c in h.checks.iter().filter(|c| c.score.is_some()) {
+                    let cl = [("program", p.program_id.as_str()), ("label", p.label.as_str()), ("check", c.id)];
+                    e.gauge("sentinel_program_health_check_score", "Score of one health check, 0 to 100.", &cl, c.score.unwrap_or(0) as f64);
+                }
+            }
+        }
+
+        let mut by_severity: HashMap<(String, &'static str), u64> = HashMap::new();
+        {
+            let state = self.state.lock().unwrap();
+            for ps in state.programs.values() {
+                for open in ps.open.values() {
+                    let sev = match open.incident.severity {
+                        Severity::Low => "low",
+                        Severity::Medium => "medium",
+                        Severity::High => "high",
+                        Severity::Critical => "critical",
+                    };
+                    *by_severity.entry((ps.program.program_id.clone(), sev)).or_default() += 1;
+                }
+            }
+        }
+        let mut rows: Vec<_> = by_severity.into_iter().collect();
+        rows.sort();
+        for ((program, severity), n) in rows {
+            e.gauge("sentinel_incidents_open", "Open incidents by program and severity.", &[("program", program.as_str()), ("severity", severity)], n as f64);
+        }
+        for ((channel, event, outcome), n) in self.dispatcher.delivery_stats() {
+            e.counter(
+                "sentinel_alert_deliveries_total",
+                "Alert and summary deliveries by channel, event and outcome.",
+                &[("channel", channel.as_str()), ("event", event.as_str()), ("outcome", outcome)],
+                n as f64,
+            );
+        }
+        e.gauge("sentinel_alert_rules", "Alert rules.", &[], self.state.lock().unwrap().rules.len() as f64);
+        e.finish()
     }
 
     pub fn allow_private_webhooks(&self) -> bool {
@@ -1227,6 +2426,360 @@ impl Sentinel {
             .collect()
     }
 
+    /// Sends every scheduled summary that has come due. A report missed by more than
+    /// six hours (the server was down) is skipped rather than sent late. Returns how many were sent.
+    pub fn send_due_summaries(&self, now: DateTime<Utc>) -> usize {
+        const CATCH_UP: i64 = 6 * 3600;
+        let Ok(schedules) = self.store.schedules() else { return 0 };
+        let mut sent = 0;
+        for mut schedule in schedules.into_iter().filter(|s| s.enabled) {
+            let due = schedule.due_at(now);
+            let late = (now - due).num_seconds();
+            let fresh = schedule.last_sent_at.is_none_or(|last| last < due);
+            // A schedule created after its slot waits for the next one.
+            if !fresh || late > CATCH_UP || schedule.created_at > due || !self.is_monitored(&schedule.program_id) {
+                continue;
+            }
+            // Claim the slot before sending, so a slow send is never repeated.
+            schedule.last_sent_at = Some(now);
+            if self.store.update_schedule(&schedule).is_err() {
+                continue;
+            }
+            match self.send_summary(&schedule) {
+                Ok(()) => sent += 1,
+                Err(e) => tracing::warn!(schedule = schedule.id, error = %e, "summary not sent"),
+            }
+        }
+        sent
+    }
+
+    /// Builds the schedule's report and delivers it to its channels.
+    pub fn send_summary(&self, schedule: &SummarySchedule) -> Result<()> {
+        let summary = self.summary(&schedule.program_id, schedule.period.secs())?;
+        let facts: Vec<[String; 2]> = summary.facts().into_iter().map(|(k, v)| [k, v]).collect();
+        let link = format!("{}/programs/{}/summary", self.public_url.trim_end_matches('/'), schedule.program_id);
+        let rule = AlertRule {
+            id: -schedule.id,
+            owner: Some(schedule.owner.clone()),
+            name: schedule.period.label().to_string(),
+            program_id: Some(schedule.program_id.clone()),
+            condition: Condition::Incident { kinds: vec![], min_severity: Severity::Low },
+            create_incident: false,
+            severity: Severity::Low,
+            webhook_url: None,
+            channels: schedule.channels.clone(),
+            enabled: true,
+            cooldown_secs: 0,
+            created_at: schedule.created_at,
+            last_fired_at: None,
+        };
+        self.dispatcher.dispatch(Alert {
+            rule,
+            program_id: schedule.program_id.clone(),
+            program_label: summary.label.clone(),
+            message: summary.headline.clone(),
+            incident_id: None,
+            severity: Severity::Low,
+            event: AlertEvent::Summary,
+            payload: json!({
+                "event": "sentinel.summary",
+                "period": schedule.period,
+                "program": { "id": schedule.program_id, "label": summary.label },
+                "message": summary.headline,
+                "summary": summary,
+                "facts": facts,
+                "next_actions": summary.next_actions,
+                "links": { "incident": link },
+            }),
+        });
+        Ok(())
+    }
+
+    /// A transaction with its trace (value flow, call tree, narrative) and the incidents it belongs to.
+    pub async fn explain_transaction(&self, signature: &str) -> Result<Option<serde_json::Value>> {
+        let Some(tx) = self.transaction(signature).await? else { return Ok(None) };
+        let labels = self.program_labels();
+        let (mut trace, landing, tip) = tokio::join!(
+            crate::trace::build(&tx, &labels, self.rpc.as_deref(), &self.owners, &self.prices, Some(&self.idls)),
+            self.beam.landing(signature),
+            self.beam.tip_in(&tx),
+        );
+        if let Some(line) = crate::beam::describe(landing.as_ref(), tip.as_ref()) {
+            trace.narrative.push(line);
+        }
+        let programs: Vec<&String> = labels.keys().filter(|p| tx.touches(p)).collect();
+        Ok(Some(json!({
+            "transaction": tx,
+            "trace": trace,
+            "beam": { "landing": landing, "tip": tip },
+            "monitored_programs": programs,
+            "program_labels": labels,
+            "incidents": self.store.incidents_for_transaction(signature)?,
+        })))
+    }
+
+    /// The incident with the history needed to diagnose it.
+    fn incident_with_history(&self, id: i64) -> Result<Option<(Incident, Vec<Incident>)>> {
+        let Some(incident) = self.store.incident(id)? else { return Ok(None) };
+        let history = self.store.incidents(Some(&incident.program_id), 300)?;
+        Ok(Some((incident, history)))
+    }
+
+    pub fn diagnose_incident(&self, id: i64) -> Result<Option<crate::report::Diagnosis>> {
+        Ok(self.incident_with_history(id)?.map(|(i, h)| crate::report::diagnose(&i, &h)))
+    }
+
+    /// A markdown post-mortem for the incident.
+    pub fn incident_report(&self, id: i64) -> Result<Option<String>> {
+        let Some((incident, history)) = self.incident_with_history(id)? else { return Ok(None) };
+        let label = self.program_labels().get(&incident.program_id).cloned().unwrap_or_else(|| short_sig(&incident.program_id));
+        let txs = self.store.incident_transactions(id, 10)?;
+        let cluster = if self.cluster == "mainnet" { String::new() } else { format!("?cluster={}", self.cluster) };
+        Ok(Some(crate::report::markdown(&incident, &label, &txs, &history, &self.incident_link(id), &cluster)))
+    }
+
+    /// Loads the last few minutes of the program's transactions over RPC, so the detectors
+    /// start with a real baseline instead of waiting several minutes to learn one. History goes
+    /// through the same decoding as live traffic but raises no incidents or alerts.
+    pub async fn backfill(&self, program_id: &str) -> Result<BackfillReport> {
+        use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+        use solana_sdk::commitment_config::CommitmentConfig;
+        let Some(rpc) = self.rpc.clone() else { bail!("needs a Solana RPC") };
+        let address = solana_sdk::pubkey::Pubkey::try_from(program_id).map_err(|_| anyhow::anyhow!("not a valid program address"))?;
+        let started = Utc::now().timestamp();
+        // Live data wins: only history from before the first live transaction is wanted.
+        let live_from = {
+            let state = self.state.lock().unwrap();
+            let ps = state.programs.get(program_id).ok_or_else(|| anyhow::anyhow!("program not monitored"))?;
+            ps.window.first_second.unwrap_or(started)
+        };
+        let since = started - BACKFILL_SECS;
+
+        let mut signatures = Vec::new();
+        let mut before = None;
+        for _ in 0..3 {
+            let page = rpc
+                .get_signatures_for_address_with_config(
+                    &address,
+                    GetConfirmedSignaturesForAddress2Config {
+                        before: before.as_ref().and_then(|s: &String| s.parse().ok()),
+                        until: None,
+                        limit: Some(1000),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                    },
+                )
+                .await?;
+            let Some(last) = page.last() else { break };
+            before = Some(last.signature.clone());
+            let reached_start = last.block_time.is_some_and(|t| t < since);
+            signatures.extend(page);
+            if reached_start || signatures.len() >= BACKFILL_MAX_TX {
+                break;
+            }
+        }
+        let wanted: Vec<String> = signatures
+            .into_iter()
+            .filter(|s| s.block_time.is_some_and(|t| t >= since && t < live_from))
+            .map(|s| s.signature)
+            .take(BACKFILL_MAX_TX)
+            .collect();
+        if wanted.is_empty() {
+            return Ok(BackfillReport { transactions: 0, seconds: 0 });
+        }
+
+        // Newest signatures come first; fetch a dozen at a time and stop if it drags on.
+        let url = rpc.url();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(BACKFILL_BUDGET_SECS);
+        let mut fetched: Vec<VortexTransaction> = Vec::new();
+        for chunk in wanted.chunks(60) {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            let results = futures_util::future::join_all(chunk.chunks(5).map(|group| {
+                let url = url.clone();
+                async move {
+                    let mut out = Vec::new();
+                    for sig in group {
+                        if let Ok(Some(tx)) = vortex::geyser::rpc_frame::fetch_transaction(&url, sig).await {
+                            out.push(tx);
+                        }
+                    }
+                    out
+                }
+            }))
+            .await;
+            fetched.extend(results.into_iter().flatten());
+        }
+        fetched.sort_by_key(|t| t.received_at);
+        self.apply_history(program_id, fetched, started)
+    }
+
+    /// Feeds historical transactions into a program's windows, known errors and hourly rollups.
+    fn apply_history(&self, program_id: &str, txs: Vec<VortexTransaction>, now: i64) -> Result<BackfillReport> {
+        let (program, live_from) = {
+            let state = self.state.lock().unwrap();
+            let ps = state.programs.get(program_id).ok_or_else(|| anyhow::anyhow!("program not monitored"))?;
+            (ps.program.clone(), ps.window.first_second.unwrap_or(now))
+        };
+        let mut window = Window::default();
+        let mut fingerprints: HashMap<String, Fingerprint> = HashMap::new();
+        let mut first_seen: HashMap<String, i64> = HashMap::new();
+        let mut rollups: HashMap<i64, crate::rollup::Rollup> = HashMap::new();
+        let mut count = 0usize;
+        let mut earliest = now;
+        let mut latest = 0;
+        for tx in txs.iter().filter(|t| t.touches(program_id)) {
+            let second = tx.received_at.timestamp();
+            if second >= live_from || self.state.lock().unwrap().tx_index.contains_key(&tx.signature) {
+                continue;
+            }
+            let summary = summarize(tx, program_id, &self.prices, Some(&self.idls));
+            let fp = fingerprint_with(tx, Some(&self.idls));
+            if let Some(fp) = &fp {
+                fingerprints.entry(fp.key()).or_insert_with(|| fp.clone());
+                first_seen.entry(fp.key()).or_insert(second);
+            }
+            window.record(second, tx.success, summary.compute_units, tx.fee, tx.fee_payer(), fp.as_ref().map(Fingerprint::key));
+            let mut names = summary.instructions.clone();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                names.push("(unnamed)".into());
+            }
+            window.record_instructions(second, &names, tx.success, summary.compute_units);
+            let hour = second - second.rem_euclid(3600);
+            let error = fp.as_ref().map(|f| (f.key(), describe_fingerprint(Some(f), &f.key(), &program_labels_one(&program))));
+            rollups.entry(hour).or_default().record(crate::rollup::Observation {
+                ok: tx.success,
+                fee: tx.fee,
+                compute_units: summary.compute_units,
+                signer: tx.fee_payer(),
+                instructions: &names,
+                error: error.as_ref().map(|(k, l)| (k.as_str(), l.as_str())),
+                usd: 0.0,
+                sol: 0.0,
+                big: None,
+            });
+            count += 1;
+            earliest = earliest.min(second);
+            latest = latest.max(second);
+        }
+        if count == 0 {
+            return Ok(BackfillReport { transactions: 0, seconds: 0 });
+        }
+        // Hours already summarised (by an earlier run) are left alone so nothing is counted twice.
+        for (hour, rollup) in rollups {
+            if self.store.rollup(program_id, hour)?.is_none() {
+                self.store.put_rollup(program_id, hour, &rollup)?;
+            }
+        }
+        use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
+        let mut state = self.state.lock().unwrap();
+        let Some(ps) = state.programs.get_mut(program_id) else { return Ok(BackfillReport { transactions: 0, seconds: 0 }) };
+        ps.window.absorb_earlier(window, now, ANOMALY_FAILURE | ANOMALY_ACTIVITY | ANOMALY_COMPUTE);
+        for (k, v) in fingerprints {
+            ps.fingerprints.entry(k).or_insert(v);
+        }
+        // Errors seen in the history are not "new" when they show up again.
+        for (k, t) in first_seen {
+            let e = ps.fingerprint_first_seen.entry(k).or_insert(t);
+            *e = (*e).min(t);
+        }
+        Ok(BackfillReport { transactions: count, seconds: latest - earliest })
+    }
+
+    /// A cached posture, if one has been read; never touches the network.
+    fn cached_posture(&self, program_id: &str) -> Option<crate::posture::Posture> {
+        self.postures.lock().unwrap().get(program_id).map(|(_, p)| p.clone())
+    }
+
+    /// How healthy a program is right now, check by check.
+    pub fn health(&self, program_id: &str) -> Option<crate::health::Health> {
+        let state = self.state.lock().unwrap();
+        let ps = state.programs.get(program_id)?;
+        Some(self.health_of(ps, state.stalled, Utc::now().timestamp()))
+    }
+
+    fn health_of(&self, ps: &ProgramState, feed_stalled: bool, now: i64) -> crate::health::Health {
+        let program_id = ps.program.program_id.as_str();
+        let posture = self.cached_posture(program_id);
+        let idl_loaded = self.idls.cached(program_id).is_some();
+        let snapshot = snapshot(ps, now);
+        let open: Vec<Incident> = ps.open.values().map(|o| o.incident.clone()).collect();
+        crate::health::evaluate(&crate::health::Inputs {
+            snapshot: &snapshot,
+            open: &open,
+            feed_stalled,
+            idl_loaded,
+            posture: posture.as_ref(),
+            vaults_watched: ps.program.detection.vaults.len(),
+            dependencies: ps.deps.values().filter(|d| d.calls >= MIN_DEP_CALLS).count(),
+            now,
+        })
+    }
+
+    /// What a program did over the last `period_secs`, from the stored hourly rollups.
+    pub fn summary(&self, program_id: &str, period_secs: i64) -> Result<crate::summary::Summary> {
+        let label = {
+            let state = self.state.lock().unwrap();
+            let ps = state.programs.get(program_id).ok_or_else(|| anyhow::anyhow!("program is not being monitored"))?;
+            // Include the hour in progress.
+            if let Some((hour, rollup)) = &ps.rollup {
+                self.store.put_rollup(program_id, *hour, rollup)?;
+            }
+            ps.program.label.clone()
+        };
+        let mut summary = crate::summary::build(
+            &self.store,
+            program_id,
+            &label,
+            Utc::now().timestamp(),
+            period_secs,
+            self.idls.cached(program_id).is_some(),
+        )?;
+        if self.cached_posture(program_id).is_some_and(|p| p.authority_kind == "single_key") {
+            summary.next_actions.push("A single wallet can upgrade this program; move the upgrade authority to a multisig.".into());
+        }
+        Ok(summary)
+    }
+
+    /// A Squads multisig that has executed upgrades with `authority`, from incidents Sentinel recorded.
+    fn known_controller(&self, program_id: &str, authority: Option<&str>) -> Option<crate::posture::Controller> {
+        let authority = authority?;
+        self.store.incidents(Some(program_id), 200).ok()?.into_iter().find_map(|i| {
+            let a = &i.evidence["authority"];
+            let via = a.get("via").filter(|v| !v.is_null())?;
+            (a["authority"].as_str() == Some(authority)).then(|| crate::posture::Controller {
+                name: via["program"].as_str().unwrap_or("multisig").to_string(),
+                multisig: via["multisig"].as_str().unwrap_or_default().to_string(),
+                requires: serde_json::from_value(a["multisig"].clone()).ok(),
+            })
+        })
+    }
+
+    pub fn is_monitored(&self, program_id: &str) -> bool {
+        self.state.lock().unwrap().programs.contains_key(program_id)
+    }
+
+    /// The program's upgrade authority and what it implies, read from chain.
+    pub async fn posture(&self, program_id: &str) -> Result<crate::posture::Posture> {
+        const FRESH: std::time::Duration = std::time::Duration::from_secs(300);
+        if let Some((at, p)) = self.postures.lock().unwrap().get(program_id) {
+            if at.elapsed() < FRESH {
+                return Ok(p.clone());
+            }
+        }
+        let Some(rpc) = &self.rpc else { bail!("Needs a Solana RPC; set SOLANA_RPC_URL") };
+        let mut posture = crate::posture::fetch(rpc, program_id).await?;
+        posture.controller = self.known_controller(program_id, posture.authority.as_deref());
+        let mut cache = self.postures.lock().unwrap();
+        if cache.len() > 500 {
+            cache.retain(|_, (at, _)| at.elapsed() < FRESH);
+        }
+        cache.insert(program_id.to_string(), (std::time::Instant::now(), posture.clone()));
+        Ok(posture)
+    }
+
     pub fn is_watching(&self, account: &str, program_id: &str) -> bool {
         self.state
             .lock()
@@ -1255,6 +2808,8 @@ impl Sentinel {
                 label,
                 created_at: Utc::now(),
                 detection: DetectionConfig::default(),
+                muted_until: None,
+                mute_reason: None,
             };
             self.store.upsert_program(&program)?;
             state
@@ -1264,6 +2819,7 @@ impl Sentinel {
         };
         self.sync_filters();
         self.idls.request(&program.program_id);
+        let _ = self.backfill_queue.send(program.program_id.clone());
         Ok(program)
     }
 
@@ -1300,6 +2856,7 @@ impl Sentinel {
 
     pub fn set_incident_status(&self, id: i64, status: IncidentStatus) -> Result<Incident> {
         let mut state = self.state.lock().unwrap();
+        let rules = state.rules.clone();
         for ps in state.programs.values_mut() {
             let key = ps.open.iter().find(|(_, o)| o.incident.id == id).map(|(k, _)| k.clone());
             if let Some(key) = key {
@@ -1310,6 +2867,12 @@ impl Sentinel {
                     }
                     let inc = ps.open.get(&key).map(|o| o.incident.clone());
                     self.resolve(ps, &key, Utc::now().timestamp());
+                    let mut alerts = Vec::new();
+                    for (event, changed) in std::mem::take(&mut ps.lifecycle) {
+                        alerts.extend(self.incident_alerts(&rules, ps, &changed, event));
+                    }
+                    drop(state);
+                    self.send_alerts(alerts);
                     return inc.ok_or_else(|| anyhow::anyhow!("incident vanished"));
                 }
                 let open = ps.open.get_mut(&key).unwrap();
@@ -1354,12 +2917,26 @@ impl Sentinel {
             program_label: program_id.clone(),
             program_id,
             incident_id: None,
+            severity: rule.severity,
+            event: AlertEvent::Test,
             rule,
         });
     }
 }
 
 // ------------------------------------------------------------------ helpers
+
+/// " after 12m" for a resolved incident, empty if the timing is unknown.
+fn resolved_after(incident: &Incident) -> String {
+    let start = incident.onset_at.unwrap_or(incident.detected_at);
+    let Some(end) = incident.resolved_at else { return String::new() };
+    let secs = (end - start).num_seconds().max(0);
+    match secs {
+        0..=89 => format!(" after {secs}s"),
+        90..=5399 => format!(" after {}m", secs / 60),
+        _ => format!(" after {:.1}h", secs as f64 / 3600.0),
+    }
+}
 
 /// A rule fires for a program when it targets it (or all programs) and its
 /// owner watches that program. Ownerless rules predate accounts and apply everywhere.
@@ -1411,6 +2988,21 @@ fn program_labels_one(p: &MonitoredProgram) -> HashMap<String, String> {
     HashMap::from([(p.program_id.clone(), p.label.clone())])
 }
 
+fn vault_evidence(d: &Drain, symbol: &str) -> serde_json::Value {
+    json!({
+        "account": d.vault,
+        "mint": d.mint,
+        "symbol": symbol,
+        "outflow": d.outflow,
+        "balance_after": d.balance_after,
+        "pct": d.pct,
+        "usd": d.usd,
+    })
+}
+
+/// Evidence keys set by detectors that `refresh_evidence` must not drop.
+const KEPT_EVIDENCE: [&str; 4] = ["authority", "deploy", "vault", "dependency"];
+
 fn refresh_evidence(open: &mut OpenIncident, fps: &HashMap<String, Fingerprint>, labels: &HashMap<String, String>) {
     let total: u64 = open.fingerprint_counts.values().map(|(c, _)| c).sum();
     let mut rows: Vec<_> = open.fingerprint_counts.iter().collect();
@@ -1433,7 +3025,14 @@ fn refresh_evidence(open: &mut OpenIncident, fps: &HashMap<String, Fingerprint>,
             })
         })
         .collect();
-    open.incident.evidence = json!({ "fingerprints": fingerprints, "fingerprinted": total });
+    let mut evidence = json!({ "fingerprints": fingerprints, "fingerprinted": total });
+    // Evidence a detector attached itself (the authority event, a correlated deploy) outlives refreshes.
+    for key in KEPT_EVIDENCE {
+        if let Some(v) = open.incident.evidence.get(key) {
+            evidence[key] = v.clone();
+        }
+    }
+    open.incident.evidence = evidence;
 }
 
 fn snapshot(ps: &ProgramState, now: i64) -> ProgramSnapshot {

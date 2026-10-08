@@ -22,20 +22,21 @@ const STEPS = [
 
 function Hero({ initial }: { initial?: string }) {
   return (
-    <section className="panel overflow-hidden">
-      <div className="px-5 pt-6 pb-2 md:px-8 md:pt-8">
+    <section className="panel relative overflow-hidden">
+      <div aria-hidden className="hero-grid pointer-events-none absolute inset-0" />
+      <div className="relative px-5 pt-8 pb-3 md:px-10 md:pt-14">
         <p className="inline-flex items-center gap-1.5 rounded-full border border-line-strong px-2.5 py-1 text-xs text-ink-2">
           <Zap className="size-3 text-accent" aria-hidden /> Live on Solana mainnet
         </p>
-        <h1 className="mt-3 max-w-2xl text-2xl font-semibold tracking-tight text-ink md:text-3xl">
-          Know when your Solana program breaks, before your users tell you.
+        <h1 className="mt-4 max-w-3xl text-4xl font-semibold leading-[1.05] tracking-tight text-ink md:text-6xl">
+          Know when your Solana program breaks, <span className="hero-accent">before your users tell you.</span>
         </h1>
-        <p className="mt-2 max-w-2xl text-sm text-ink-2 md:text-base">
+        <p className="mt-4 max-w-2xl text-base text-ink-2 md:text-lg">
           Sentinel watches every transaction your program receives, flags trouble the moment it starts, and shows you what went wrong.
         </p>
       </div>
-      <Finder initial={initial} />
-      <div className="grid gap-px border-t border-line bg-line md:grid-cols-3">
+      <div className="relative"><Finder initial={initial} /></div>
+      <div className="relative grid gap-px border-t border-line bg-line md:grid-cols-3">
         {STEPS.map((s) => (
           <div key={s.title} className="bg-surface px-5 py-4 md:px-8">
             <p className="flex items-center gap-2 text-sm font-medium text-ink">

@@ -11,6 +11,18 @@ pub struct MonitoredProgram {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub detection: DetectionConfig,
+    /// While set and in the future, notifications for this program are held (a maintenance
+    /// window). Incidents still open and are recorded.
+    #[serde(default)]
+    pub muted_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub mute_reason: Option<String>,
+}
+
+impl MonitoredProgram {
+    pub fn is_muted(&self, now: DateTime<Utc>) -> bool {
+        self.muted_until.is_some_and(|t| t > now)
+    }
 }
 
 /// Thresholds for the built-in detectors. Every detector compares a short
@@ -60,6 +72,28 @@ pub struct DetectionConfig {
     /// Any single transfer worth at least this many USD (priced by Blur,
     /// liquid tokens only). `None` disables the USD check.
     pub transfer_usd_threshold: Option<f64>,
+
+    /// Upgrades, upgrade-authority changes and closure of the program itself.
+    pub authority_enabled: bool,
+
+    /// One wallet suddenly sending most of a program's traffic.
+    pub concentration_enabled: bool,
+    /// Percent of the last minute's transactions one wallet must account for...
+    pub concentration_share_pct: f64,
+    /// ...out of at least this many transactions.
+    pub concentration_min_tx: u32,
+
+    /// Vault and treasury accounts (token accounts, or SOL accounts) to watch for drains.
+    pub vaults: Vec<String>,
+    pub drain_enabled: bool,
+    /// Net outflow is judged over this window.
+    pub drain_window_secs: u32,
+    /// A vault losing at least this percent of its balance in the window is an incident...
+    pub drain_pct: f64,
+    /// ...as is losing this much value in the window, whatever share of the balance it is.
+    pub drain_usd: Option<f64>,
+    /// Outflows worth less than this (where priced) are ignored, so a dust vault isn't an incident.
+    pub drain_min_usd: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +143,16 @@ impl Default for DetectionConfig {
                 },
             ],
             transfer_usd_threshold: Some(250_000.0),
+            authority_enabled: true,
+            concentration_enabled: true,
+            concentration_share_pct: 60.0,
+            concentration_min_tx: 100,
+            vaults: Vec::new(),
+            drain_enabled: true,
+            drain_window_secs: 600,
+            drain_pct: 20.0,
+            drain_usd: Some(100_000.0),
+            drain_min_usd: 1_000.0,
         }
     }
 }
@@ -123,6 +167,14 @@ pub enum IncidentKind {
     LargeTransfer,
     RuleTriggered,
     ErrorSpike,
+    /// The program's code or upgrade authority changed.
+    AuthorityChange,
+    /// A watched vault lost a large part of its balance.
+    VaultDrain,
+    /// A program this one calls was upgraded or changed hands.
+    DependencyChange,
+    /// One wallet is sending most of the program's traffic, unlike before.
+    BotActivity,
 }
 
 impl IncidentKind {
@@ -135,6 +187,10 @@ impl IncidentKind {
             Self::LargeTransfer => "large_transfer",
             Self::RuleTriggered => "rule_triggered",
             Self::ErrorSpike => "error_spike",
+            Self::AuthorityChange => "authority_change",
+            Self::VaultDrain => "vault_drain",
+            Self::DependencyChange => "dependency_change",
+            Self::BotActivity => "bot_activity",
         }
     }
 
@@ -151,6 +207,10 @@ impl IncidentKind {
             Self::LargeTransfer => "Large transfer",
             Self::RuleTriggered => "Alert rule triggered",
             Self::ErrorSpike => "Error spike",
+            Self::AuthorityChange => "Program upgrade or authority change",
+            Self::VaultDrain => "Vault outflow",
+            Self::DependencyChange => "Dependency changed",
+            Self::BotActivity => "Traffic concentrated in one wallet",
         }
     }
 }
@@ -233,11 +293,234 @@ pub struct AlertRule {
     pub condition: Condition,
     pub create_incident: bool,
     pub severity: Severity,
+    /// Legacy single-URL target. Kept so stored rules and old API clients keep
+    /// working; it is read as one channel when `channels` is empty.
     pub webhook_url: Option<String>,
+    /// Where alerts are delivered. Empty falls back to `webhook_url`.
+    #[serde(default)]
+    pub channels: Vec<Channel>,
     pub enabled: bool,
     pub cooldown_secs: u32,
     pub created_at: DateTime<Utc>,
     pub last_fired_at: Option<DateTime<Utc>>,
+}
+
+impl AlertRule {
+    /// The channels this rule delivers to, including a legacy `webhook_url`.
+    pub fn targets(&self) -> Vec<Channel> {
+        if !self.channels.is_empty() {
+            return self.channels.clone();
+        }
+        match self.webhook_url.as_deref().filter(|u| !u.is_empty()) {
+            Some(url) => vec![Channel::from_url(url)],
+            None => Vec::new(),
+        }
+    }
+
+    pub fn has_targets(&self) -> bool {
+        !self.channels.is_empty() || self.webhook_url.as_deref().is_some_and(|u| !u.is_empty())
+    }
+
+    /// A copy that is safe to return from the API: secrets are masked.
+    pub fn masked(&self) -> Self {
+        let mut r = self.clone();
+        r.channels = r.channels.iter().map(Channel::masked).collect();
+        if let Some(url) = r.webhook_url.as_deref() {
+            if let ChannelKind::Webhook { url: u } | ChannelKind::Slack { url: u } | ChannelKind::Discord { url: u } =
+                Channel::from_url(url).masked().kind
+            {
+                r.webhook_url = Some(u);
+            }
+        }
+        r
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SummaryPeriod {
+    /// The last 24 hours, sent every day.
+    Daily,
+    /// The last 7 days, sent on Mondays.
+    Weekly,
+}
+
+impl SummaryPeriod {
+    pub fn secs(&self) -> i64 {
+        match self {
+            Self::Daily => 24 * 3600,
+            Self::Weekly => 7 * 24 * 3600,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Daily => "Daily summary",
+            Self::Weekly => "Weekly summary",
+        }
+    }
+}
+
+/// A recurring report of what a program did, delivered to chat channels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummarySchedule {
+    pub id: i64,
+    pub owner: String,
+    pub program_id: String,
+    pub period: SummaryPeriod,
+    /// UTC hour (0-23) it is sent at.
+    pub hour_utc: u8,
+    pub channels: Vec<Channel>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub last_sent_at: Option<DateTime<Utc>>,
+}
+
+impl SummarySchedule {
+    /// The most recent moment this report was due at or before `now`.
+    pub fn due_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        use chrono::{Datelike, Duration, TimeZone};
+        let today = Utc
+            .with_ymd_and_hms(now.year(), now.month(), now.day(), self.hour_utc.min(23) as u32, 0, 0)
+            .single()
+            .unwrap_or(now);
+        let day = if today <= now { today } else { today - Duration::days(1) };
+        match self.period {
+            SummaryPeriod::Daily => day,
+            SummaryPeriod::Weekly => day - Duration::days(day.weekday().num_days_from_monday() as i64),
+        }
+    }
+
+    pub fn masked(&self) -> Self {
+        let mut s = self.clone();
+        s.channels = s.channels.iter().map(Channel::masked).collect();
+        s
+    }
+}
+
+/// An API token for agents (the MCP server). Only its hash is stored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiToken {
+    pub id: i64,
+    pub account: String,
+    pub name: String,
+    /// "read" can look at everything the account can; "write" can also change things.
+    pub scope: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Where an alert is delivered.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ChannelKind {
+    /// Raw JSON POST.
+    Webhook { url: String },
+    /// Slack incoming webhook (Block Kit message).
+    Slack { url: String },
+    Discord { url: String },
+    /// Telegram bot: messages reply to the incident's first message.
+    Telegram { bot_token: String, chat_id: String },
+    /// PagerDuty Events API v2: triggers and resolves by incident.
+    Pagerduty { routing_key: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Channel {
+    #[serde(flatten)]
+    pub kind: ChannelKind,
+    /// Only alerts at or above this severity go to this channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_severity: Option<Severity>,
+}
+
+/// Prefix of a masked secret returned by the API. A masked value sent back on
+/// update means "keep the stored secret".
+pub const MASK: char = '•';
+
+fn mask(secret: &str) -> String {
+    let tail: String = secret.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{MASK}{MASK}{MASK}{MASK}{tail}")
+}
+
+/// Webhook URLs carry their secret in the path: show scheme and host only.
+fn mask_url(url: &str) -> String {
+    match reqwest::Url::parse(url) {
+        Ok(u) if u.path().len() > 1 || u.query().is_some() => {
+            format!("{}://{}/{MASK}{MASK}{MASK}{MASK}", u.scheme(), u.host_str().unwrap_or_default())
+        }
+        _ => url.to_string(),
+    }
+}
+
+impl Channel {
+    pub fn from_url(url: &str) -> Self {
+        let kind = if url.contains("discord.com/api/webhooks") || url.contains("discordapp.com/api/webhooks") {
+            ChannelKind::Discord { url: url.into() }
+        } else if url.contains("hooks.slack.com") {
+            ChannelKind::Slack { url: url.into() }
+        } else {
+            ChannelKind::Webhook { url: url.into() }
+        };
+        Self { kind, min_severity: None }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self.kind {
+            ChannelKind::Webhook { .. } => "webhook",
+            ChannelKind::Slack { .. } => "slack",
+            ChannelKind::Discord { .. } => "discord",
+            ChannelKind::Telegram { .. } => "telegram",
+            ChannelKind::Pagerduty { .. } => "pagerduty",
+        }
+    }
+
+    /// Short, secret-free description for the delivery log.
+    pub fn display(&self) -> String {
+        match &self.kind {
+            ChannelKind::Webhook { url } | ChannelKind::Slack { url } | ChannelKind::Discord { url } => mask_url(url),
+            ChannelKind::Telegram { chat_id, .. } => format!("telegram chat {chat_id}"),
+            ChannelKind::Pagerduty { .. } => "pagerduty".into(),
+        }
+    }
+
+    pub fn is_masked(&self) -> bool {
+        match &self.kind {
+            ChannelKind::Webhook { url } | ChannelKind::Slack { url } | ChannelKind::Discord { url } => url.contains(MASK),
+            ChannelKind::Telegram { bot_token, .. } => bot_token.starts_with(MASK),
+            ChannelKind::Pagerduty { routing_key } => routing_key.starts_with(MASK),
+        }
+    }
+
+    pub fn masked(&self) -> Self {
+        let kind = match &self.kind {
+            ChannelKind::Webhook { url } => ChannelKind::Webhook { url: mask_url(url) },
+            ChannelKind::Slack { url } => ChannelKind::Slack { url: mask_url(url) },
+            ChannelKind::Discord { url } => ChannelKind::Discord { url: mask_url(url) },
+            ChannelKind::Telegram { bot_token, chat_id } => ChannelKind::Telegram {
+                bot_token: mask(bot_token),
+                chat_id: chat_id.clone(),
+            },
+            ChannelKind::Pagerduty { routing_key } => ChannelKind::Pagerduty { routing_key: mask(routing_key) },
+        };
+        Self { kind, min_severity: self.min_severity }
+    }
+
+    /// Fills a masked secret from the stored channel it replaces.
+    pub fn restore_secret(&mut self, old: &Channel) -> bool {
+        if !self.is_masked() {
+            return true;
+        }
+        match (&mut self.kind, &old.kind) {
+            (ChannelKind::Webhook { url }, ChannelKind::Webhook { url: o })
+            | (ChannelKind::Slack { url }, ChannelKind::Slack { url: o })
+            | (ChannelKind::Discord { url }, ChannelKind::Discord { url: o }) => *url = o.clone(),
+            (ChannelKind::Telegram { bot_token, .. }, ChannelKind::Telegram { bot_token: o, .. }) => *bot_token = o.clone(),
+            (ChannelKind::Pagerduty { routing_key }, ChannelKind::Pagerduty { routing_key: o }) => *routing_key = o.clone(),
+            _ => return false,
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +546,128 @@ pub enum Condition {
         kinds: Vec<IncidentKind>,
         min_severity: Severity,
     },
+    /// The program's health score (0-100) drops below `below`.
+    Health { below: u8 },
+    /// A wallet that appears in the program's transactions (a keeper, a fee payer) holds less
+    /// SOL than it should.
+    WalletBalance { account: String, below_sol: f64 },
+    /// Sentinel itself can't see the chain: its stream stalled, or RPC keeps failing.
+    System {
+        /// Empty = any.
+        #[serde(default)]
+        kinds: Vec<SystemKind>,
+    },
+    /// A call to an instruction, matched on its decoded name, arguments and accounts.
+    Instruction {
+        /// Instruction names to match, separated by `,` or `|`: `withdraw`, `set_*|update_*`.
+        /// Case, underscores and dashes are ignored, so `SetAuthority` matches `set_authority`.
+        /// Empty matches every instruction.
+        #[serde(default)]
+        name: String,
+        /// Which program's instruction. Default: the monitored program.
+        #[serde(default)]
+        program_id: Option<String>,
+        /// Conditions on `args.<field>`, `accounts.<name>`, `signer` or `instruction`.
+        #[serde(default)]
+        filters: Vec<ArgFilter>,
+        #[serde(default)]
+        match_mode: MatchMode,
+        /// Only successful calls (the default). A failed call changed nothing on chain.
+        #[serde(default = "yes_default")]
+        success_only: bool,
+        /// Only when the signer has never called a matching instruction before.
+        #[serde(default)]
+        first_seen_signer: bool,
+    },
+    /// An event the program emitted (`emit!` or `emit_cpi!`), matched on its decoded name and fields.
+    /// Needs the program's Anchor IDL.
+    Event {
+        /// Event names to match, as for instructions. Empty matches every event.
+        #[serde(default)]
+        name: String,
+        /// Which program emitted it. Default: the monitored program.
+        #[serde(default)]
+        program_id: Option<String>,
+        /// Conditions on `fields.<name>`, `signer` or `event`.
+        #[serde(default)]
+        filters: Vec<ArgFilter>,
+        #[serde(default)]
+        match_mode: MatchMode,
+        /// Only events from successful transactions (the default): a failed one never happened.
+        #[serde(default = "yes_default")]
+        success_only: bool,
+    },
+}
+
+/// Ways Sentinel can be blind, as opposed to something being wrong with a program.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemKind {
+    /// The chain tip stopped advancing on the stream; detectors are paused.
+    FeedStalled,
+    /// Several RPC calls in a row failed.
+    RpcFailing,
+}
+
+impl SystemKind {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::FeedStalled => "Sentinel's feed has stalled",
+            Self::RpcFailing => "Sentinel's RPC is failing",
+        }
+    }
+}
+
+fn yes_default() -> bool {
+    true
+}
+
+/// One condition on a decoded instruction: `args.amount > 1000000000`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArgFilter {
+    pub path: String,
+    pub op: FilterOp,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    /// Text contains the value, or a list holds it.
+    Contains,
+    /// The field is present and not null; the value is ignored.
+    Exists,
+}
+
+impl FilterOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Eq => "=",
+            Self::Ne => "≠",
+            Self::Gt => ">",
+            Self::Gte => "≥",
+            Self::Lt => "<",
+            Self::Lte => "≤",
+            Self::Contains => "contains",
+            Self::Exists => "exists",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// Every filter must hold.
+    #[default]
+    All,
+    /// At least one filter holds.
+    Any,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,7 +739,14 @@ pub struct AlertExecution {
     pub fired_at: DateTime<Utc>,
     pub message: String,
     pub incident_id: Option<i64>,
+    /// Secret-free description of the target (kept under its old name).
     pub webhook_url: Option<String>,
+    /// `slack`, `telegram`, ... Empty on rows written before channels existed.
+    #[serde(default)]
+    pub channel: Option<String>,
+    /// `opened`, `updated`, `resolved` or `test`.
+    #[serde(default)]
+    pub event: Option<String>,
     pub delivered: bool,
     pub status_code: Option<u16>,
     pub error: Option<String>,

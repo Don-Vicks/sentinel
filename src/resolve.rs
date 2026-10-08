@@ -23,7 +23,7 @@ const LOADERS: [&str; 4] = [
     "LoaderV411111111111111111111111111111111111",
 ];
 /// Programs every transaction touches; listed last so the interesting ones lead.
-const INFRA: [&str; 7] = [
+pub const INFRA: [&str; 7] = [
     "11111111111111111111111111111111",
     "ComputeBudget111111111111111111111111111111",
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",

@@ -266,3 +266,44 @@ export function Panel({
     </section>
   );
 }
+
+/** Page sections as URL-backed tabs, so a tab can be linked to and survives reload. */
+export function Tabs<T extends string>({
+  label,
+  value,
+  onChange,
+  tabs,
+}: {
+  label: string;
+  value: T;
+  onChange: (v: T) => void;
+  tabs: { value: T; label: string; badge?: number; tone?: 'crit' | 'warn' }[];
+}) {
+  return (
+    <div role="tablist" aria-label={label} className="flex gap-1 overflow-x-auto border-b border-line">
+      {tabs.map((t) => {
+        const on = t.value === value;
+        return (
+          <button
+            key={t.value}
+            role="tab"
+            id={`tab-${t.value}`}
+            aria-selected={on}
+            aria-controls={`panel-${t.value}`}
+            onClick={() => onChange(t.value)}
+            className={`-mb-px inline-flex h-10 shrink-0 items-center gap-1.5 border-b-2 px-3 text-sm ${
+              on ? 'border-brand font-medium text-ink' : 'border-transparent text-ink-2 hover:text-ink'
+            }`}
+          >
+            {t.label}
+            {!!t.badge && (
+              <span className={`num rounded px-1.5 text-[11px] font-medium ${t.tone === 'crit' ? 'bg-crit-soft text-crit' : 'bg-warn-soft text-warn'}`}>
+                {t.badge}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}

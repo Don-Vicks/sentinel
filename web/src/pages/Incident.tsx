@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router';
-import { CheckCircle2, Search } from 'lucide-react';
+import { CheckCircle2, ClipboardCopy, Rocket, Search } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import { useAuth } from '../lib/auth';
-import type { Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
-import { clock, compact, duration, KIND_LABEL, num, pct, short, usd } from '../lib/format';
+import type { AuthorityEvidence, Incident as IncidentT, IncidentStatus, TxSummary } from '../lib/types';
+import { clock, compact, duration, explorer, explorerAccount, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { ShareBar } from '../components/charts';
-import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, ShowMore, Spinner, Stat, StatusBadge } from '../components/ui';
+import { Address, Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, ShowMore, Spinner, Stat, StatusBadge } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
 import { IncidentTimeline } from '../components/IncidentTimeline';
@@ -17,9 +17,76 @@ function fmtMetric(metric: string | null, v: number | null) {
   if (metric === 'failure_rate') return pct(v);
   if (metric === 'tps') return `${v.toFixed(2)} TPS`;
   if (metric === 'avg_compute') return `${compact(v)} CU`;
+  if (metric === 'vault_outflow_pct') return pct(v, 0);
   if (metric === 'error_count') return `${Number.isInteger(v) ? num(v) : num(v, 1)} / 60s`;
   if (metric === 'transfer_usd') return usd(v) ?? '—';
   return compact(v);
+}
+
+/** Copies the incident's markdown post-mortem, ready to paste into a doc or a channel. */
+function ReportButton({ id }: { id: number }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'copied' | 'failed'>('idle');
+  const copy = async () => {
+    setState('busy');
+    try {
+      const res = await fetch(`/api/incidents/${id}/report`);
+      if (!res.ok) throw new Error('report unavailable');
+      await navigator.clipboard.writeText(await res.text());
+      setState('copied');
+    } catch {
+      setState('failed');
+    }
+    setTimeout(() => setState('idle'), 2000);
+  };
+  return (
+    <button className="btn" onClick={copy} disabled={state === 'busy'} title="Copy a markdown post-mortem">
+      {state === 'busy' ? <Spinner /> : <ClipboardCopy className="size-4" aria-hidden />}
+      {state === 'copied' ? 'Copied' : state === 'failed' ? 'Could not copy' : 'Post-mortem'}
+    </button>
+  );
+}
+
+const ACTION_LABEL: Record<AuthorityEvidence['action'], string> = {
+  upgrade: 'Program code replaced',
+  set_authority: 'Upgrade authority changed',
+  close: 'Program closed',
+  extend: 'Program data extended',
+};
+
+/** What the upgradeable loader was asked to do, and by whom. */
+function AuthorityPanel({ ev }: { ev: AuthorityEvidence }) {
+  const rows: [string, React.ReactNode][] = [
+    ['Action', ACTION_LABEL[ev.action]],
+    ['Signed by', ev.authority ? <Address value={ev.authority} n={6} /> : '—'],
+  ];
+  if (ev.action === 'upgrade') rows.push(['New code from buffer', ev.buffer ? <Address value={ev.buffer} n={6} /> : '—']);
+  if (ev.action === 'set_authority')
+    rows.push(['New authority', ev.new_authority ? <Address value={ev.new_authority} n={6} /> : 'none: the program is now immutable']);
+  if (ev.action === 'close' && ev.recipient) rows.push(['Funds to', <Address value={ev.recipient} n={6} />]);
+  if (ev.action === 'extend') rows.push(['Added', `${num(ev.additional_bytes ?? 0)} bytes`]);
+  if (ev.via) {
+    rows.push(['Executed by', <span>{ev.via.program} multisig <Address value={ev.via.multisig} n={6} /></span>]);
+    if (ev.via.executor) rows.push(['Member who signed', <Address value={ev.via.executor} n={6} />]);
+    if (ev.multisig) {
+      rows.push(['It requires', `${ev.multisig.threshold} of ${ev.multisig.members} signatures${ev.multisig.time_lock ? `, then a ${Math.round(ev.multisig.time_lock / 3600)}h time lock` : ''}`]);
+    }
+  } else {
+    rows.push(['Executed via', ev.path.includes('.') ? 'another program (CPI), such as a multisig vote' : 'a direct instruction']);
+  }
+  rows.push(['Transaction', <a className="link font-mono text-xs" href={explorer(ev.signature)} target="_blank" rel="noreferrer">{short(ev.signature, 6)}</a>]);
+  rows.push(['Slot', num(ev.slot)]);
+  return (
+    <Panel title="What changed">
+      <dl className="grid gap-x-6 gap-y-2 p-4 sm:grid-cols-[max-content_1fr] text-sm">
+        {rows.map(([k, v]) => (
+          <div key={k} className="contents">
+            <dt className="text-ink-3">{k}</dt>
+            <dd>{v}</dd>
+          </div>
+        ))}
+      </dl>
+    </Panel>
+  );
 }
 
 export function Incident() {
@@ -85,7 +152,9 @@ export function Incident() {
           </span>
         }
         actions={
-          ongoing && (
+          <>
+            <ReportButton id={inc.id} />
+            {ongoing && (
             <>
               {inc.status === 'open' && (
                 <button className="btn" disabled={busy} onClick={() => setStatus('investigating')}>
@@ -96,7 +165,8 @@ export function Incident() {
                 {busy ? <Spinner /> : <CheckCircle2 className="size-4" aria-hidden />} Resolve
               </button>
             </>
-          )
+            )}
+          </>
         }
       />
 
@@ -112,7 +182,36 @@ export function Incident() {
         <p className="text-xs text-ink-3 mt-2">Source: {inc.source === 'detector' ? 'built-in detector' : inc.source.replace(':', ' #')}</p>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+      {inc.evidence.deploy && (
+        <div className="rounded-md border border-warn/40 bg-warn-soft px-4 py-3 text-sm" role="note">
+          <p className="font-medium text-warn flex items-center gap-2"><Rocket className="size-4" aria-hidden /> Started after a program upgrade</p>
+          <p className="text-ink-2 mt-1">
+            {inc.evidence.deploy.note}{' '}
+            <Link className="link" to={`/incidents/${inc.evidence.deploy.incident_id}`}>See the upgrade</Link>
+            {' · '}
+            <a className="link" href={explorer(inc.evidence.deploy.signature)} target="_blank" rel="noreferrer">transaction</a>
+          </p>
+        </div>
+      )}
+
+      {inc.evidence.authority && <AuthorityPanel ev={inc.evidence.authority} />}
+
+      {inc.evidence.vault && (
+        <Panel title="Vault">
+          <dl className="grid gap-x-6 gap-y-2 p-4 sm:grid-cols-[max-content_1fr] text-sm">
+            <dt className="text-ink-3">Account</dt>
+            <dd><a className="link" href={explorerAccount(inc.evidence.vault.account)} target="_blank" rel="noreferrer"><Address value={inc.evidence.vault.account} n={6} copy={false} /></a></dd>
+            <dt className="text-ink-3">Net outflow</dt>
+            <dd className="num">{compact(inc.evidence.vault.outflow)} {inc.evidence.vault.symbol}{inc.evidence.vault.usd !== null ? ` (${usd(inc.evidence.vault.usd)})` : ''}</dd>
+            <dt className="text-ink-3">Share of balance</dt>
+            <dd className="num">{pct(inc.evidence.vault.pct, 0)}</dd>
+            <dt className="text-ink-3">Left in the vault</dt>
+            <dd className="num">{compact(inc.evidence.vault.balance_after)} {inc.evidence.vault.symbol}</dd>
+          </dl>
+        </Panel>
+      )}
+
+      <div className={`grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 ${inc.kind === 'authority_change' ? 'hidden' : ''}`}>
         <Stat label="Observed" value={fmtMetric(inc.metric, inc.observed)} tone={ongoing ? 'crit' : undefined} />
         <Stat label="Peak" value={fmtMetric(inc.metric, inc.peak)} />
         <Stat label="Normal baseline" value={fmtMetric(inc.metric, inc.baseline)} sub={inc.threshold !== null ? `threshold ${fmtMetric(inc.metric, inc.threshold)}` : undefined} />

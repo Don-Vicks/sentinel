@@ -73,6 +73,10 @@ function primary(inc: Incident, tl: Timeline) {
       };
     }
     case 'large_transfer':
+    case 'vault_drain':
+    case 'dependency_change':
+    case 'bot_activity':
+    case 'authority_change':
       return {
         title: 'Transactions per second (context)',
         series: [{ label: 'TPS', values: pts.map((p) => p.tps), color: SERIES[0] }],
