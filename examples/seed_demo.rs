@@ -52,6 +52,8 @@ fn main() -> anyhow::Result<()> {
         label: "Pump.fun".into(),
         created_at: Utc::now() - Duration::days(2),
         detection: Default::default(),
+        muted_until: None,
+        mute_reason: None,
     })?;
 
     // Twenty-four hours of traffic, busier in the evening, with a bad patch after the upgrade.

@@ -11,6 +11,18 @@ pub struct MonitoredProgram {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub detection: DetectionConfig,
+    /// While set and in the future, notifications for this program are held (a maintenance
+    /// window). Incidents still open and are recorded.
+    #[serde(default)]
+    pub muted_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub mute_reason: Option<String>,
+}
+
+impl MonitoredProgram {
+    pub fn is_muted(&self, now: DateTime<Utc>) -> bool {
+        self.muted_until.is_some_and(|t| t > now)
+    }
 }
 
 /// Thresholds for the built-in detectors. Every detector compares a short

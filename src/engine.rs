@@ -61,6 +61,8 @@ pub struct Sentinel {
     postures: Mutex<HashMap<String, (std::time::Instant, crate::posture::Posture)>>,
     /// (program, instruction, signer) combinations already recorded as seen.
     seen_signers: Mutex<HashSet<String>>,
+    /// Incidents whose opening notice was held by a maintenance window, so their end is held too.
+    held_incidents: Mutex<HashSet<i64>>,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
@@ -313,6 +315,7 @@ impl Sentinel {
             rpc_txs: Mutex::new(HashMap::new()),
             postures: Mutex::new(HashMap::new()),
             seen_signers: Mutex::new(HashSet::new()),
+            held_incidents: Mutex::new(HashSet::new()),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
@@ -626,9 +629,7 @@ impl Sentinel {
             }
         }
         drop(guard);
-        for a in alerts {
-            self.dispatcher.dispatch(a);
-        }
+        self.send_alerts(alerts);
     }
 
     fn maybe_link(
@@ -937,9 +938,7 @@ impl Sentinel {
         if resync_filters {
             self.sync_filters();
         }
-        for a in alerts {
-            self.dispatcher.dispatch(a);
-        }
+        self.send_alerts(alerts);
     }
 
     /// Opens or refreshes the incident for a firing detector. Returns the
@@ -1663,6 +1662,82 @@ impl Sentinel {
         }
     }
 
+    /// Delivers alerts, except opening and escalation notices for programs in a maintenance
+    /// window. Those are logged as held, so it is clear why nothing arrived. A resolution
+    /// still goes out: whoever was told about a problem should hear it is over.
+    fn send_alerts(&self, alerts: Vec<Alert>) {
+        if alerts.is_empty() {
+            return;
+        }
+        let now = Utc::now();
+        let muted: HashMap<String, DateTime<Utc>> = {
+            let state = self.state.lock().unwrap();
+            state
+                .programs
+                .values()
+                .filter(|ps| ps.program.is_muted(now))
+                .filter_map(|ps| ps.program.muted_until.map(|t| (ps.program.program_id.clone(), t)))
+                .collect()
+        };
+        for alert in alerts {
+            let muted_until = muted.get(&alert.program_id).copied();
+            let mut held_ids = self.held_incidents.lock().unwrap();
+            // Held: an opening or escalation in a maintenance window, and the end of one whose
+            // start was held (nobody heard it begin, so nobody needs to hear it end).
+            let hold: Option<DateTime<Utc>> = match (alert.event, alert.incident_id) {
+                (AlertEvent::Opened | AlertEvent::Updated, Some(id)) if muted_until.is_some() => {
+                    held_ids.insert(id);
+                    muted_until
+                }
+                (AlertEvent::Opened | AlertEvent::Updated, None) => muted_until,
+                (AlertEvent::Resolved, Some(id)) if held_ids.remove(&id) => Some(muted_until.unwrap_or(now)),
+                _ => None,
+            };
+            drop(held_ids);
+            match hold {
+                Some(until) => {
+                    let exec = AlertExecution {
+                        id: 0,
+                        owner: alert.rule.owner.clone(),
+                        rule_id: alert.rule.id,
+                        rule_name: alert.rule.name.clone(),
+                        program_id: alert.program_id.clone(),
+                        fired_at: now,
+                        message: alert.message.clone(),
+                        incident_id: alert.incident_id,
+                        webhook_url: Some("held".into()),
+                        channel: None,
+                        event: Some(alert.event.as_str().to_string()),
+                        delivered: false,
+                        status_code: None,
+                        error: Some(format!("Held: alerts for this program are muted until {} UTC", until.format("%H:%M"))),
+                        latency_ms: None,
+                        attempts: 0,
+                    };
+                    if let Ok(exec) = self.store.record_execution(exec) {
+                        self.emit(LiveEvent::Alert { execution: exec });
+                    }
+                }
+                None => self.dispatcher.dispatch(alert),
+            }
+        }
+    }
+
+    /// Mutes (or, with 0 minutes, unmutes) notifications for a program, e.g. during a deploy.
+    pub fn set_mute(&self, program_id: &str, minutes: u32, reason: Option<String>) -> Result<MonitoredProgram> {
+        let mut state = self.state.lock().unwrap();
+        let Some(ps) = state.programs.get_mut(program_id) else { bail!("program not monitored") };
+        if minutes == 0 {
+            ps.program.muted_until = None;
+            ps.program.mute_reason = None;
+        } else {
+            ps.program.muted_until = Some(Utc::now() + chrono::Duration::minutes(minutes.min(7 * 24 * 60) as i64));
+            ps.program.mute_reason = reason.map(|r| r.trim().chars().take(120).collect()).filter(|r: &String| !r.is_empty());
+        }
+        self.store.upsert_program(&ps.program)?;
+        Ok(ps.program.clone())
+    }
+
     /// Adds what a multisig requires (3 of 5 signatures) to the incident its execution opened.
     pub async fn enrich_multisig(&self, incident_id: i64, multisig: &str) -> Result<()> {
         let Some(rpc) = &self.rpc else { return Ok(()) };
@@ -2042,6 +2117,8 @@ impl Sentinel {
             e.gauge("sentinel_program_avg_compute_units", "Average compute units per transaction over the last minute.", &l, p.avg_cu_60s);
             e.gauge("sentinel_program_unique_signers_60s", "Distinct fee payers in the last minute.", &l, p.unique_signers_60s as f64);
             e.gauge("sentinel_program_open_incidents", "Incidents that are not resolved.", &l, p.open_incidents as f64);
+            let muted = self.state.lock().unwrap().programs.get(&p.program_id).is_some_and(|ps| ps.program.is_muted(Utc::now()));
+            e.gauge("sentinel_program_muted", "1 while notifications for the program are held (a maintenance window).", &l, muted as u8 as f64);
             e.counter("sentinel_program_transactions_total", "Transactions observed since Sentinel started.", &l, p.total_tx as f64);
             e.counter("sentinel_program_failed_transactions_total", "Failed transactions observed since Sentinel started.", &l, p.total_failed as f64);
             if let Some(last) = p.last_tx_at {
@@ -2628,6 +2705,8 @@ impl Sentinel {
                 label,
                 created_at: Utc::now(),
                 detection: DetectionConfig::default(),
+                muted_until: None,
+                mute_reason: None,
             };
             self.store.upsert_program(&program)?;
             state
@@ -2690,9 +2769,7 @@ impl Sentinel {
                         alerts.extend(self.incident_alerts(&rules, ps, &changed, event));
                     }
                     drop(state);
-                    for a in alerts {
-                        self.dispatcher.dispatch(a);
-                    }
+                    self.send_alerts(alerts);
                     return inc.ok_or_else(|| anyhow::anyhow!("incident vanished"));
                 }
                 let open = ps.open.get_mut(&key).unwrap();

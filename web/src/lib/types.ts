@@ -341,6 +341,9 @@ export interface MonitoredProgram {
   program_id: string;
   label: string;
   created_at: string;
+  /** Notifications are held until this time (a maintenance window). */
+  muted_until?: string | null;
+  mute_reason?: string | null;
 }
 
 // --- Transaction (Vortex model) -------------------------------------------

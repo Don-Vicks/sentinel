@@ -15,6 +15,7 @@ import { PostureCard } from '../components/PostureCard';
 import { HealthCard } from '../components/HealthCard';
 import { FundsCard } from '../components/FundsCard';
 import { DependenciesCard } from '../components/DependenciesCard';
+import { MuteControl } from '../components/MuteControl';
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
@@ -229,6 +230,8 @@ export function Program() {
           {watchError}
         </p>
       )}
+
+      <MuteControl program={data.program} onChange={(p) => setData((d) => (d ? { ...d, program: p } : d))} />
 
       {open.length > 0 && <IncidentBanner incidents={open} />}
 

@@ -60,6 +60,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
         .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/mute", axum::routing::put(mute_program))
         .route("/api/programs/{id}/dependencies", get(program_dependencies))
         .route("/api/programs/{id}/vaults", get(program_vaults).put(set_program_vaults))
         .route("/api/programs/{id}/summary", get(program_summary))
@@ -291,6 +292,30 @@ async fn metrics(State(s): State<AppState>, headers: axum::http::HeaderMap) -> R
         }
     }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], s.metrics_text()).into_response()
+}
+
+#[derive(Deserialize)]
+struct MuteInput {
+    /// Minutes to hold notifications for, up to a week. 0 lifts it.
+    minutes: u32,
+    reason: Option<String>,
+}
+
+/// A maintenance window. Shared with everyone watching the program, so watchers may set it.
+async fn mute_program(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Path(id): Path<String>,
+    Json(body): Json<MuteInput>,
+) -> ApiResult<Value> {
+    Ok(Json(mute_inner(&s, &account, &id, body.minutes, body.reason)?))
+}
+
+pub(crate) fn mute_inner(s: &Sentinel, account: &str, id: &str, minutes: u32, reason: Option<String>) -> Result<Value, ApiError> {
+    if !s.is_watching(account, id) && !s.limits.is_admin(account) {
+        return Err(forbidden("Watch the program to mute it"));
+    }
+    Ok(json!(s.set_mute(id, minutes, reason)?))
 }
 
 /// The programs this one calls, with how often.

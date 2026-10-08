@@ -286,6 +286,15 @@ Give `channels` (slack/telegram/pagerduty/discord/webhook) or `channels_from_rul
             write: true,
         },
         Tool {
+            name: "mute_program",
+            description: "Hold notifications for a program for a while (a maintenance window, e.g. during a deploy). Incidents are still recorded and a resolution is still sent. 0 minutes lifts it.",
+            schema: object(
+                json!({ "program": program, "minutes": { "type": "integer", "description": "0 to 10080 (a week)." }, "reason": { "type": "string" } }),
+                &["program", "minutes"],
+            ),
+            write: true,
+        },
+        Tool {
             name: "send_summary_now",
             description: "Deliver a scheduled summary to its channels immediately.",
             schema: object(json!({ "schedule_id": { "type": "integer" } }), &["schedule_id"]),
@@ -619,6 +628,11 @@ async fn run_tool(s: &Arc<Sentinel>, ctx: &Ctx, name: &str, args: &Value) -> Res
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect();
             json_out(api::set_vaults_inner(s, account, &id, &vaults).map_err(api_err)?)
+        }
+        "mute_program" => {
+            let id = resolve_program(s, str_arg(args, "program")?)?;
+            let minutes = args["minutes"].as_u64().ok_or("`minutes` must be a whole number")?.min(7 * 24 * 60) as u32;
+            json_out(api::mute_inner(s, account, &id, minutes, args["reason"].as_str().map(String::from)).map_err(api_err)?)
         }
         "send_summary_now" => {
             let id = id_arg(args, "schedule_id")?;
