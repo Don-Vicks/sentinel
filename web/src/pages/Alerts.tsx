@@ -484,7 +484,7 @@ function AlertsBody() {
               <tbody>
                 {rules.data.map((r) => (
                   <tr key={r.id} className={r.enabled ? '' : 'opacity-60'}>
-                    <td className="font-medium">{r.name}</td>
+                    <td className="font-medium min-w-52">{r.name}</td>
                     <td className="text-ink-2">{label(r.program_id)}</td>
                     <td className="text-ink-2 text-xs">{describe(r.condition)}{r.create_incident && r.condition.type !== 'incident' ? ' → incident' : ''}</td>
                     <td className="text-xs text-ink-2">
