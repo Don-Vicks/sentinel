@@ -17,8 +17,25 @@ pub struct Idl {
     pub program_id: String,
     pub name: Option<String>,
     instructions: Vec<IdlInstruction>,
+    events: Vec<IdlEvent>,
     errors: HashMap<u32, IdlError>,
     types: HashMap<String, Value>,
+}
+
+struct IdlEvent {
+    name: String,
+    discriminator: Vec<u8>,
+    /// The field definitions: `[{name, type}]`.
+    fields: Value,
+}
+
+/// A program event (`emit!` or `emit_cpi!`), decoded with the program's IDL.
+#[derive(Debug, Clone, Serialize)]
+pub struct DecodedEvent {
+    pub name: String,
+    pub fields: Value,
+    /// Fields that could not be decoded.
+    pub partial: bool,
 }
 
 struct IdlInstruction {
@@ -139,8 +156,27 @@ impl Idl {
             .flatten()
             .filter_map(|t| Some((t["name"].as_str()?.to_string(), t["type"].clone())))
             .collect();
+        let events = v["events"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let name = e["name"].as_str()?.to_string();
+                let discriminator = match e.get("discriminator").and_then(Value::as_array) {
+                    Some(d) => d.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect(),
+                    None => solana_sdk::hash::hashv(&[b"event:", name.as_bytes()]).to_bytes()[..8].to_vec(),
+                };
+                // The current spec defines the payload as a type of the same name; the legacy one inlines it.
+                let fields = match e.get("fields") {
+                    Some(f) => f.clone(),
+                    None => v["types"].as_array()?.iter().find(|t| t["name"] == e["name"])?["type"]["fields"].clone(),
+                };
+                Some(IdlEvent { name, discriminator, fields })
+            })
+            .collect();
         Ok(Self {
             program_id: program_id.to_string(),
+            events,
             name: v["metadata"]["name"].as_str().or(v["name"].as_str()).map(str::to_string),
             instructions,
             errors,
@@ -185,6 +221,22 @@ impl Idl {
             accounts: named,
             partial,
         })
+    }
+
+    /// Whether the IDL declares any events.
+    pub fn has_events(&self) -> bool {
+        !self.events.is_empty()
+    }
+
+    /// An event from its serialized form: the 8-byte discriminator, then the fields.
+    pub fn decode_event(&self, data: &[u8]) -> Option<DecodedEvent> {
+        let ev = self.events.iter().find(|e| !e.discriminator.is_empty() && data.starts_with(&e.discriminator))?;
+        let mut cur = &data[ev.discriminator.len()..];
+        let (fields, partial) = match self.read_fields(&ev.fields, &mut cur, 0) {
+            Ok(v) => (v, false),
+            Err(_) => (Value::Object(Map::new()), true),
+        };
+        Some(DecodedEvent { name: ev.name.clone(), fields, partial })
     }
 
     fn read(&self, ty: &Value, cur: &mut &[u8], depth: u8) -> Result<Value> {
@@ -310,6 +362,13 @@ pub struct ArgSchema {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct EventSchema {
+    pub name: String,
+    /// Where a rule filter finds each field: `fields.sol_amount`.
+    pub fields: Vec<ArgSchema>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct InstructionSchema {
     pub name: String,
     pub accounts: Vec<String>,
@@ -338,6 +397,23 @@ fn type_label(ty: &Value) -> String {
 }
 
 impl Idl {
+    /// What an event rule can filter on.
+    pub fn event_schema(&self) -> Vec<EventSchema> {
+        self.events
+            .iter()
+            .map(|e| EventSchema {
+                name: e.name.clone(),
+                fields: e
+                    .fields
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| Some(ArgSchema { path: format!("fields.{}", f["name"].as_str()?), r#type: type_label(f.get("type")?) }))
+                    .collect(),
+            })
+            .collect()
+    }
+
     /// What a rule can filter on: each instruction's accounts and arguments, struct arguments one level deep.
     pub fn schema(&self) -> Vec<InstructionSchema> {
         self.instructions

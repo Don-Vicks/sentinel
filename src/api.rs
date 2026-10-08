@@ -60,6 +60,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
         .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/events", get(program_events))
         .route("/api/programs/{id}/protect", post(protect_program))
         .route("/api/programs/{id}/mute", axum::routing::put(mute_program))
         .route("/api/programs/{id}/dependencies", get(program_dependencies))
@@ -523,9 +524,22 @@ async fn program_idl(State(s): State<AppState>, Path(id): Path<String>) -> ApiRe
         return Err(not_found("program"));
     }
     Ok(Json(match s.idls.get(&id).await {
-        Some(idl) => json!({ "loaded": true, "name": idl.name, "instructions": idl.schema() }),
-        None => json!({ "loaded": false, "name": null, "instructions": [] }),
+        Some(idl) => json!({ "loaded": true, "name": idl.name, "instructions": idl.schema(), "events": idl.event_schema() }),
+        None => json!({ "loaded": false, "name": null, "instructions": [], "events": [] }),
     }))
+}
+
+/// The latest events the program emitted, decoded with its IDL.
+async fn program_events(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    let idl = s.idls.get(&id).await;
+    Ok(Json(json!({
+        "idl_loaded": idl.is_some(),
+        "declares_events": idl.as_ref().is_some_and(|i| i.has_events()),
+        "events": s.recent_events(&id, 100),
+    })))
 }
 
 async fn program_health(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {

@@ -149,6 +149,19 @@ struct ProgramState {
     vaults: HashMap<String, VaultState>,
     /// Programs this one calls (CPI), from the call trees of its transactions.
     deps: HashMap<String, DepStat>,
+    /// The latest decoded program events, newest first.
+    events: VecDeque<EventRecord>,
+}
+
+const RECENT_EVENTS: usize = 200;
+
+/// A decoded program event, as shown on the dashboard.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EventRecord {
+    pub at: DateTime<Utc>,
+    pub signature: String,
+    pub name: String,
+    pub fields: serde_json::Value,
 }
 
 #[derive(Default, Clone)]
@@ -244,6 +257,7 @@ impl ProgramState {
             window: Window::default(),
             recent: VecDeque::new(),
             recent_full: VecDeque::new(),
+            events: VecDeque::new(),
             fingerprints: HashMap::new(),
             fingerprint_first_seen: HashMap::new(),
             open: HashMap::new(),
@@ -565,6 +579,7 @@ impl Sentinel {
             ps.recent.truncate(RECENT_SUMMARIES);
             ps.recent_full.push_front((tx.clone(), summary.clone()));
             ps.recent_full.truncate(RECENT_FULL);
+            self.note_events(ps, &tx);
             ps.pending_feed.push(summary.clone());
 
             let keys: Vec<String> = ps.open.keys().cloned().collect();
@@ -603,6 +618,9 @@ impl Sentinel {
                 }
                 if matches!(rule.condition, Condition::Instruction { .. }) {
                     alerts.extend(self.instruction_rule(ps, rule, &tx, &summary, second));
+                }
+                if matches!(rule.condition, Condition::Event { .. }) {
+                    alerts.extend(self.event_rule(ps, rule, &tx, &summary, second));
                 }
                 if let Condition::WalletBalance { account, below_sol } = &rule.condition {
                     if let Some(a) = tx.accounts.iter().find(|a| &a.pubkey == account) {
@@ -1389,6 +1407,59 @@ impl Sentinel {
         None
     }
 
+    /// Matches an event rule against the events the transaction emitted; the alert, if it fires.
+    fn event_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        use crate::instruction_rule as ir;
+        let Condition::Event { name, program_id, filters, match_mode, success_only } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        let target = program_id.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| ps.program.program_id.clone());
+        if !tx.touches(&target) {
+            return None;
+        }
+        let Some(idl) = self.idls.cached(&target) else {
+            self.idls.request(&target);
+            return None;
+        };
+        for ev in crate::events::emitted(tx, &target, &idl) {
+            if !ir::name_matches(name, &ev.name) {
+                continue;
+            }
+            let Some(seen) = ir::filters_hold(&ev.root, filters, *match_mode) else { continue };
+            let msg = format!(
+                "{} emitted in {}{}",
+                ev.name,
+                short_sig(&tx.signature),
+                if seen.is_empty() { String::new() } else { format!(" ({})", seen.join(", ").replace("fields.", "")) }
+            );
+            let value = ir::headline_value(&ev.root, filters);
+            return self.fire_rule(ps, rule, msg, value, LinkFilter::Manual, true, second, Some((tx, summary)));
+        }
+        None
+    }
+
+    /// Keeps the program's latest decoded events for the dashboard.
+    fn note_events(&self, ps: &mut ProgramState, tx: &VortexTransaction) {
+        if !tx.success || !crate::events::may_carry(tx) {
+            return;
+        }
+        let Some(idl) = self.idls.cached(&ps.program.program_id) else { return };
+        for ev in crate::events::emitted(tx, &ps.program.program_id, &idl) {
+            ps.events.push_front(EventRecord { at: tx.received_at, signature: tx.signature.clone(), name: ev.name, fields: ev.fields });
+        }
+        ps.events.truncate(RECENT_EVENTS);
+    }
+
     /// Adds one transaction to the hour's rollup, starting a new hour when needed.
     fn record_rollup(
         &self,
@@ -1610,6 +1681,12 @@ impl Sentinel {
     }
 
     /// The programs this one calls, busiest first, with how often and whether they are watched.
+    /// The program's latest decoded events, newest first.
+    pub fn recent_events(&self, program_id: &str, limit: usize) -> Vec<EventRecord> {
+        let state = self.state.lock().unwrap();
+        state.programs.get(program_id).map(|ps| ps.events.iter().take(limit).cloned().collect()).unwrap_or_default()
+    }
+
     pub fn dependencies(&self, program_id: &str) -> Option<serde_json::Value> {
         let state = self.state.lock().unwrap();
         let ps = state.programs.get(program_id)?;
@@ -1910,6 +1987,7 @@ impl Sentinel {
                 Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
                 Condition::Incident { .. }
                 | Condition::Instruction { .. }
+                | Condition::Event { .. }
                 | Condition::System { .. }
                 | Condition::Health { .. }
                 | Condition::WalletBalance { .. } => (None, 60),

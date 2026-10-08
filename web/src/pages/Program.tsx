@@ -16,6 +16,7 @@ import { HealthCard } from '../components/HealthCard';
 import { FundsCard } from '../components/FundsCard';
 import { DependenciesCard } from '../components/DependenciesCard';
 import { MuteControl } from '../components/MuteControl';
+import { EventsCard } from '../components/EventsCard';
 import { ProtectCard } from '../components/ProtectCard';
 import { SummaryView } from './Summary';
 
@@ -324,6 +325,8 @@ export function Program() {
 
       {tab === 'activity' && (
         <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" className="space-y-6">
+        <EventsCard programId={id} />
+
         <Panel title="Instructions (last 5 min)">
           {s.instructions.length === 0 ? (
             <Empty title="No instructions yet" />

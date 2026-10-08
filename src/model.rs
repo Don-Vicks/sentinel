@@ -579,6 +579,24 @@ pub enum Condition {
         #[serde(default)]
         first_seen_signer: bool,
     },
+    /// An event the program emitted (`emit!` or `emit_cpi!`), matched on its decoded name and fields.
+    /// Needs the program's Anchor IDL.
+    Event {
+        /// Event names to match, as for instructions. Empty matches every event.
+        #[serde(default)]
+        name: String,
+        /// Which program emitted it. Default: the monitored program.
+        #[serde(default)]
+        program_id: Option<String>,
+        /// Conditions on `fields.<name>`, `signer` or `event`.
+        #[serde(default)]
+        filters: Vec<ArgFilter>,
+        #[serde(default)]
+        match_mode: MatchMode,
+        /// Only events from successful transactions (the default): a failed one never happened.
+        #[serde(default = "yes_default")]
+        success_only: bool,
+    },
 }
 
 /// Ways Sentinel can be blind, as opposed to something being wrong with a program.
@@ -623,6 +641,8 @@ pub enum FilterOp {
     Lte,
     /// Text contains the value, or a list holds it.
     Contains,
+    /// The field is present and not null; the value is ignored.
+    Exists,
 }
 
 impl FilterOp {
@@ -635,6 +655,7 @@ impl FilterOp {
             Self::Lt => "<",
             Self::Lte => "≤",
             Self::Contains => "contains",
+            Self::Exists => "exists",
         }
     }
 }

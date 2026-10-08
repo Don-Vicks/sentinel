@@ -278,15 +278,35 @@ export type Condition =
       match_mode: 'all' | 'any';
       success_only: boolean;
       first_seen_signer: boolean;
+    }
+  | {
+      type: 'event';
+      name: string;
+      program_id?: string | null;
+      filters: ArgFilter[];
+      match_mode: 'all' | 'any';
+      success_only: boolean;
     };
 
-export type FilterOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains';
+export type FilterOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains' | 'exists';
 
 export interface ArgFilter {
   /** `args.amount`, `accounts.authority`, `signer` or `instruction`. */
   path: string;
   op: FilterOp;
   value: string | number | boolean;
+}
+
+export interface EventSchema {
+  name: string;
+  fields: { path: string; type: string }[];
+}
+
+export interface ProgramEvent {
+  at: string;
+  signature: string;
+  name: string;
+  fields: Record<string, unknown>;
 }
 
 export interface InstructionSchema {

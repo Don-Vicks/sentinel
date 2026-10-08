@@ -6,13 +6,13 @@ import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
 import { useAuth } from '../lib/auth';
 import { RequireAccount } from '../components/SignIn';
-import type { AlertExecution, AlertRule, ArgFilter, Condition, FilterOp, InstructionSchema, Metric, Severity } from '../lib/types';
+import type { AlertExecution, AlertRule, ArgFilter, Condition, FilterOp, EventSchema, InstructionSchema, Metric, Severity } from '../lib/types';
 import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs } from '../components/ui';
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
-type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'system' | 'health' | 'wallet';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'event' | 'system' | 'health' | 'wallet';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
@@ -24,6 +24,7 @@ const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: numb
   { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000 },
   { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
   { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0 },
+  { id: 'event', label: 'The program emits an event', unit: '', defaultValue: 0 },
   { id: 'health', label: 'The program\'s health score drops below', unit: '/ 100', defaultValue: 70 },
   { id: 'wallet', label: 'A wallet\'s SOL balance drops below', unit: 'SOL', defaultValue: 1 },
   { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0 },
@@ -37,6 +38,7 @@ const OPS: { value: FilterOp; label: string }[] = [
   { value: 'eq', label: '=' },
   { value: 'ne', label: '≠' },
   { value: 'contains', label: 'contains' },
+  { value: 'exists', label: 'is present' },
 ];
 
 /** Names that usually mean someone is changing how the program works or taking money out. */
@@ -86,8 +88,13 @@ function describe(c: Condition) {
       return `${short(c.account)} holds less than ${c.below_sol} SOL`;
     case 'system':
       return `Sentinel itself is blind (${c.kinds.length ? c.kinds.join(' / ').replace(/_/g, ' ') : 'feed stalled or RPC failing'}), and when it recovers`;
+    case 'event': {
+      const symbols: Record<FilterOp, string> = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains', exists: 'is present' };
+      const conds = c.filters.map((f) => (f.op === 'exists' ? `${f.path.replace(/^fields\./, '')} is present` : `${f.path.replace(/^fields\./, '')} ${symbols[f.op]} ${f.value}`)).join(c.match_mode === 'any' ? ' or ' : ' and ');
+      return `${c.name || 'any event'} emitted${conds ? ` where ${conds}` : ''}`;
+    }
     case 'instruction': {
-      const symbols: Record<FilterOp, string> = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains' };
+      const symbols: Record<FilterOp, string> = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains', exists: 'is present' };
       const conds = c.filters.map((f) => `${f.path.replace(/^args\./, '')} ${symbols[f.op]} ${f.value}`).join(c.match_mode === 'any' ? ' or ' : ' and ');
       return `${c.name || 'any instruction'} called${conds ? ` where ${conds}` : ''}${c.first_seen_signer ? ', first time for the signer' : ''}`;
     }
@@ -124,8 +131,8 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [ixMode, setIxMode] = useState<'all' | 'any'>('all');
   const [ixSuccess, setIxSuccess] = useState(true);
   const [ixFirstSeen, setIxFirstSeen] = useState(false);
-  const idl = useFetch<{ loaded: boolean; instructions: InstructionSchema[] }>(
-    template === 'instruction' && program ? `/api/programs/${program}/idl` : null,
+  const idl = useFetch<{ loaded: boolean; instructions: InstructionSchema[]; events?: EventSchema[] }>(
+    (template === 'instruction' || template === 'event') && program ? `/api/programs/${program}/idl` : null,
   );
   const [cooldown, setCooldown] = useState('300');
   const [busy, setBusy] = useState(false);
@@ -154,11 +161,20 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     if (template === 'system') return { type: 'system', kinds: [] };
     if (template === 'health') return { type: 'health', below: Math.min(100, Math.max(1, Math.round(v))) };
     if (template === 'wallet') return { type: 'wallet_balance', account: walletAccount.trim(), below_sol: v };
+    if (template === 'event') {
+      return {
+        type: 'event',
+        name: ixName.trim(),
+        filters: ixFilters.filter((f) => f.path.trim() && (f.op === 'exists' || f.value.trim() !== '')).map((f) => ({ path: f.path.trim(), op: f.op, value: f.op === 'exists' ? true : filterValue(f.value) })),
+        match_mode: ixMode,
+        success_only: ixSuccess,
+      };
+    }
     if (template === 'instruction') {
       return {
         type: 'instruction',
         name: ixName.trim(),
-        filters: ixFilters.filter((f) => f.path.trim() && f.value.trim() !== '').map((f) => ({ path: f.path.trim(), op: f.op, value: filterValue(f.value) })),
+        filters: ixFilters.filter((f) => f.path.trim() && (f.op === 'exists' || f.value.trim() !== '')).map((f) => ({ path: f.path.trim(), op: f.op, value: f.op === 'exists' ? true : filterValue(f.value) })),
         match_mode: ixMode,
         success_only: ixSuccess,
         first_seen_signer: ixFirstSeen,
@@ -174,11 +190,15 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Name an instruction, add a condition, or choose first-time signers; otherwise this would fire on every call.');
       return;
     }
+    if (template === 'event' && !ixName.trim() && !ixFilters.some((f) => f.path.trim())) {
+      setError('Name an event or add a condition; otherwise this would fire on every event.');
+      return;
+    }
     if (template === 'wallet' && !walletAccount.trim()) {
       setError('Enter the wallet address to watch.');
       return;
     }
-    if (template !== 'incident' && template !== 'instruction' && template !== 'system' && !(Number(value) > 0)) {
+    if (template !== 'incident' && template !== 'instruction' && template !== 'event' && template !== 'system' && !(Number(value) > 0)) {
       setError('Enter a threshold greater than zero.');
       return;
     }
@@ -190,7 +210,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     setBusy(true);
     try {
       await send('POST', '/api/rules', {
-        name: name.trim() || (template === 'instruction' ? `${ixName.trim() || 'Instruction'} called` : `${tpl.label} ${template === 'incident' ? minSeverity : value}${tpl.unit}`),
+        name: name.trim() || (template === 'instruction' ? `${ixName.trim() || 'Instruction'} called` : template === 'event' ? `${ixName.trim() || 'Event'} emitted` : `${tpl.label} ${template === 'incident' ? minSeverity : value}${tpl.unit}`),
         program_id: program || null,
         condition: condition(),
         create_incident: template === 'incident' || template === 'system' ? false : createIncident,
@@ -267,14 +287,16 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <p className="md:col-span-2 text-xs text-ink-3">
             Fires when the chain tip stops advancing on Sentinel's stream (detectors pause, so a quiet program isn't reported as down) or when RPC calls keep failing, and again when it recovers.
           </p>
-        ) : template === 'instruction' ? (
+        ) : template === 'instruction' || template === 'event' ? (
           <div className="md:col-span-2 text-xs text-ink-3">
             {program
               ? idl.data?.loaded
                 ? 'Names, arguments and accounts below come from this program\'s on-chain IDL.'
                 : idl.loading
                   ? 'Reading the program\'s IDL…'
-                  : 'No Anchor IDL found for this program. You can still match instruction names; arguments and accounts need the IDL.'
+                  : template === 'event'
+                    ? 'No Anchor IDL found for this program. Event names and fields come from the IDL, so an event rule needs it.'
+                    : 'No Anchor IDL found for this program. You can still match instruction names; arguments and accounts need the IDL.'
               : 'Pick a program to get suggestions from its IDL.'}
           </div>
         ) : template === 'incident' ? (
@@ -312,25 +334,25 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         )}
       </fieldset>
 
-      {template === 'instruction' && (
+      {(template === 'instruction' || template === 'event') && (
         <div className="grid gap-3 rounded-md border border-line p-3">
           <div>
-            <label className="label" htmlFor="ix-name">Instruction name</label>
+            <label className="label" htmlFor="ix-name">{template === 'event' ? 'Event name' : 'Instruction name'}</label>
             <input
               id="ix-name"
               className="input font-mono"
               list="ix-names"
               value={ixName}
               onChange={(e) => setIxName(e.target.value)}
-              placeholder="withdraw, or set_*|update_*|*authority*"
+              placeholder={template === 'event' ? 'TradeEvent, or *Trade*|Create*' : 'withdraw, or set_*|update_*|*authority*'}
               autoComplete="off"
             />
             <datalist id="ix-names">
-              {(idl.data?.instructions ?? []).map((i) => <option key={i.name} value={i.name} />)}
+              {((template === 'event' ? idl.data?.events : idl.data?.instructions) ?? []).map((i) => <option key={i.name} value={i.name} />)}
             </datalist>
             <p className="text-xs text-ink-3 mt-1">
-              Separate several with <code>|</code>. <code>*</code> matches any text. Case and underscores are ignored, so <code>SetAuthority</code> matches <code>set_authority</code>. Leave empty to match every instruction.{' '}
-              <button type="button" className="link" onClick={() => setIxName(ADMIN_NAMES)}>Use common admin names</button>
+              Separate several with <code>|</code>. <code>*</code> matches any text. Case and underscores are ignored, so <code>SetAuthority</code> matches <code>set_authority</code>. Leave empty to match every {template === 'event' ? 'event' : 'instruction'}.{' '}
+              {template === 'instruction' && <button type="button" className="link" onClick={() => setIxName(ADMIN_NAMES)}>Use common admin names</button>}
             </p>
           </div>
           <div className="grid gap-2">
@@ -345,34 +367,36 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             </div>
             <datalist id="ix-paths">
               <option value="signer" />
-              {(idl.data?.instructions ?? [])
+              {(template === 'event' ? idl.data?.events ?? [] : idl.data?.instructions ?? [])
                 .filter((i) => !ixName.trim() || i.name.replace(/_/g, '').toLowerCase() === ixName.trim().replace(/_/g, '').toLowerCase() || ixName.includes('*') || ixName.includes('|'))
-                .flatMap((i) => [...i.args.map((a) => a.path), ...i.accounts.map((a) => `accounts.${a}`)])
+                .flatMap((i) => ('fields' in i ? i.fields.map((f) => f.path) : [...i.args.map((a) => a.path), ...i.accounts.map((a) => `accounts.${a}`)]))
                 .filter((v, k, all) => all.indexOf(v) === k)
                 .map((p) => <option key={p} value={p} />)}
             </datalist>
             {ixFilters.map((f, i) => (
               <div key={i} className="grid gap-2 sm:grid-cols-[2fr_7rem_2fr_auto]">
-                <input className="input font-mono" list="ix-paths" aria-label="Field" value={f.path} onChange={(e) => setIxFilters(ixFilters.map((x, j) => (j === i ? { ...x, path: e.target.value } : x)))} placeholder="args.amount" autoComplete="off" />
+                <input className="input font-mono" list="ix-paths" aria-label="Field" value={f.path} onChange={(e) => setIxFilters(ixFilters.map((x, j) => (j === i ? { ...x, path: e.target.value } : x)))} placeholder={template === 'event' ? 'fields.sol_amount' : 'args.amount'} autoComplete="off" />
                 <select className="input" aria-label="Comparison" value={f.op} onChange={(e) => setIxFilters(ixFilters.map((x, j) => (j === i ? { ...x, op: e.target.value as FilterOp } : x)))}>
                   {OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
-                <input className="input font-mono" aria-label="Value" value={f.value} onChange={(e) => setIxFilters(ixFilters.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} placeholder="1000000000 or an address" autoComplete="off" />
+                <input className="input font-mono" aria-label="Value" disabled={f.op === 'exists'} value={f.value} onChange={(e) => setIxFilters(ixFilters.map((x, j) => (j === i ? { ...x, value: e.target.value } : x)))} placeholder="1000000000 or an address" autoComplete="off" />
                 <button type="button" className="btn h-9 w-9 px-0" onClick={() => setIxFilters(ixFilters.filter((_, j) => j !== i))} aria-label="Remove condition">×</button>
               </div>
             ))}
             <div>
               <button type="button" className="btn h-8 text-xs" onClick={() => setIxFilters([...ixFilters, { path: '', op: 'gt', value: '' }])}>+ Add a condition</button>
-              <span className="text-xs text-ink-3 ml-2">on an argument (<code>args.amount</code>), an account (<code>accounts.authority</code>) or the <code>signer</code>. Amounts are in the token's smallest unit.</span>
+              <span className="text-xs text-ink-3 ml-2">{template === 'event' ? <>on a field of the event (<code>fields.sol_amount</code>) or the <code>signer</code>.</> : <>on an argument (<code>args.amount</code>), an account (<code>accounts.authority</code>) or the <code>signer</code>.</>} Amounts are in the token's smallest unit.</span>
             </div>
           </div>
+          {template === 'instruction' && (
           <label className="flex items-center gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={ixFirstSeen} onChange={(e) => setIxFirstSeen(e.target.checked)} />
             Only when the signer has never called a matching instruction before (learned over the first minutes after Sentinel starts watching)
           </label>
+          )}
           <label className="flex items-center gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={ixSuccess} onChange={(e) => setIxSuccess(e.target.checked)} />
-            Only successful calls
+            {template === 'event' ? 'Only events from successful transactions' : 'Only successful calls'}
           </label>
         </div>
       )}

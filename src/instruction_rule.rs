@@ -111,6 +111,7 @@ pub fn compare(op: FilterOp, actual: &Value, expected: &Value) -> bool {
             };
             same == (op == FilterOp::Eq)
         }
+        FilterOp::Exists => !actual.is_null(),
         FilterOp::Contains => match actual {
             Value::Array(items) => items.iter().any(|i| text(i) == text(expected)),
             other => text(other).to_lowercase().contains(&text(expected).to_lowercase()),
@@ -135,6 +136,7 @@ pub fn filters_hold(root: &Value, filters: &[ArgFilter], mode: MatchMode) -> Opt
     let seen: Vec<(bool, String)> = filters
         .iter()
         .map(|f| match resolve(root, &f.path) {
+            None if f.op == FilterOp::Exists => (false, format!("{} missing", f.path)),
             Some(actual) => (compare(f.op, actual, &f.value), format!("{} = {}", f.path.trim_start_matches("args."), text(actual))),
             None => (false, format!("{} missing", f.path)),
         })
