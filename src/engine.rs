@@ -89,6 +89,8 @@ struct State {
     /// Which system problems have been announced and not yet resolved, and when each last was.
     system_open: HashSet<SystemKind>,
     system_last: HashMap<SystemKind, i64>,
+    /// The dependency accounts last sent to the stream's filter.
+    dep_filter: Vec<String>,
 }
 
 /// Seconds without the chain tip advancing before the feed counts as stalled.
@@ -140,6 +142,32 @@ struct ProgramState {
     rollup_flushed: i64,
     /// Recent balance movements of the watched vaults.
     vaults: HashMap<String, VaultState>,
+    /// Programs this one calls (CPI), from the call trees of its transactions.
+    deps: HashMap<String, DepStat>,
+}
+
+#[derive(Default, Clone)]
+struct DepStat {
+    calls: u64,
+    failed: u64,
+    last_at: i64,
+}
+
+/// Dependencies watched for upgrades: the busiest few, once they have been seen a few times.
+const MAX_WATCHED_DEPS: usize = 8;
+const MIN_DEP_CALLS: u64 = 5;
+
+fn watched_dependencies(ps: &ProgramState) -> Vec<String> {
+    let mut deps: Vec<_> = ps.deps.iter().filter(|(_, d)| d.calls >= MIN_DEP_CALLS).collect();
+    deps.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then(a.0.cmp(b.0)));
+    deps.into_iter().take(MAX_WATCHED_DEPS).map(|(k, _)| k.clone()).collect()
+}
+
+fn dependency_label(program_id: &str) -> String {
+    vortex::events::programs::known_name(program_id)
+        .map(str::to_string)
+        .or_else(|| crate::catalog::name_of(program_id).map(str::to_string))
+        .unwrap_or_else(|| crate::analyze::short(program_id))
 }
 
 #[derive(Default)]
@@ -203,6 +231,7 @@ impl ProgramState {
             rollup: None,
             rollup_flushed: 0,
             vaults: HashMap::new(),
+            deps: HashMap::new(),
             program,
             window: Window::default(),
             recent: VecDeque::new(),
@@ -388,9 +417,16 @@ impl Sentinel {
     }
 
     fn sync_filters(&self) {
-        let mut ids: Vec<String> = self.state.lock().unwrap().programs.keys().cloned().collect();
-        // Authority changes touch the ProgramData account, not the program, so stream those too.
-        let data: Vec<String> = ids.iter().filter_map(|p| crate::posture::programdata_address(p)).collect();
+        let (mut ids, deps): (Vec<String>, Vec<String>) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.programs.keys().cloned().collect(),
+                state.programs.values().flat_map(watched_dependencies).collect(),
+            )
+        };
+        // Authority changes touch the ProgramData account, not the program, so stream those too,
+        // and the code accounts of the programs these ones depend on.
+        let data: Vec<String> = ids.iter().chain(deps.iter()).filter_map(|p| crate::posture::programdata_address(p)).collect();
         ids.extend(data);
         self.source.watch_programs(ids);
     }
@@ -425,8 +461,19 @@ impl Sentinel {
         let mut alerts = Vec::new();
         let rules = state.rules.clone();
         let mut noted = false;
+        let loader_call = tx.instructions.iter().any(|ix| ix.program_id == crate::resolve::UPGRADEABLE_LOADER);
         for ps in state.programs.values_mut() {
             let pid = ps.program.program_id.clone();
+            // A program this one calls was upgraded or changed hands.
+            if loader_call && ps.program.detection.authority_enabled {
+                for dep in watched_dependencies(ps) {
+                    let Some(code) = crate::posture::programdata_address(&dep) else { continue };
+                    for event in crate::posture::detect(&tx, &dep, &code) {
+                        let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+                        self.dependency_incident(ps, &tx, &summary, event, second);
+                    }
+                }
+            }
             let touches_program = tx.touches(&pid);
             let touches_code = ps.programdata.as_deref().is_some_and(|d| tx.touches(d));
             if !touches_program && !touches_code {
@@ -480,6 +527,24 @@ impl Sentinel {
             ps.window.record_instructions(second, &names, tx.success, summary.compute_units);
             self.record_rollup(ps, &tx, &summary, fp.as_ref(), &names, second);
             ps.last_tx_at = Some(tx.received_at);
+            // Which programs does this one call?
+            let mut called: Vec<&str> = tx
+                .invocations
+                .iter()
+                .filter(|i| i.depth >= 2 && i.program_id != pid && !crate::resolve::INFRA.contains(&i.program_id.as_str()))
+                .map(|i| i.program_id.as_str())
+                .collect();
+            called.sort_unstable();
+            called.dedup();
+            for dep in called {
+                if !ps.deps.contains_key(dep) && ps.deps.len() >= 64 {
+                    continue;
+                }
+                let stat = ps.deps.entry(dep.to_string()).or_default();
+                stat.calls += 1;
+                stat.failed += (!tx.success) as u64;
+                stat.last_at = second;
+            }
             ps.recent.push_front(summary.clone());
             ps.recent.truncate(RECENT_SUMMARIES);
             ps.recent_full.push_front((tx.clone(), summary.clone()));
@@ -597,6 +662,18 @@ impl Sentinel {
         }
         state.stalled = stalled;
         let paused = now < state.hold_until;
+
+        // The stream follows the programs these ones call, so their upgrades are seen too.
+        let mut resync_filters = false;
+        if now % 30 == 0 {
+            let mut deps: Vec<String> = state.programs.values().flat_map(watched_dependencies).collect();
+            deps.sort();
+            deps.dedup();
+            if deps != state.dep_filter {
+                state.dep_filter = deps;
+                resync_filters = true;
+            }
+        }
 
         // Tell the people whose rules ask for it when Sentinel can't see, and when it can again.
         let rpc_failing = self.rpc.is_some() && self.rpc_failures.load(std::sync::atomic::Ordering::Relaxed) >= RPC_FAILURES_BEFORE_ALERT;
@@ -807,6 +884,9 @@ impl Sentinel {
             self.emit(LiveEvent::Stream { health });
         }
         drop(guard);
+        if resync_filters {
+            self.sync_filters();
+        }
         for a in alerts {
             self.dispatcher.dispatch(a);
         }
@@ -1323,7 +1403,7 @@ impl Sentinel {
         let recent = self.store.incidents(Some(program_id), 100).ok()?;
         let (deploy, at, delay) = recent
             .into_iter()
-            .filter(|i| i.kind == IncidentKind::AuthorityChange && i.evidence["authority"]["action"] == "upgrade")
+            .filter(|i| matches!(i.kind, IncidentKind::AuthorityChange | IncidentKind::DependencyChange) && i.evidence["authority"]["action"] == "upgrade")
             .filter_map(|i| {
                 let at = i.onset_at.unwrap_or(i.detected_at);
                 let delay = (onset - at).num_seconds();
@@ -1331,6 +1411,7 @@ impl Sentinel {
             })
             .min_by_key(|(_, _, delay)| delay.abs())?;
         let signature = deploy.evidence["authority"]["signature"].as_str().unwrap_or_default().to_string();
+        let dependency = (deploy.kind == IncidentKind::DependencyChange).then(|| deploy.evidence["dependency"]["label"].as_str().unwrap_or("a dependency").to_string());
         let after = match delay.max(0) {
             0..=89 => format!("{}s", delay.max(0)),
             90..=5399 => format!("{}m", delay / 60),
@@ -1343,11 +1424,19 @@ impl Sentinel {
             "slot": deploy.evidence["authority"]["slot"],
             "authority": deploy.evidence["authority"]["authority"],
             "seconds_before": delay.max(0),
-            "note": format!(
-                "This began {after} after the program was upgraded (transaction {}, incident #{}), so the new code is the first suspect.",
-                short_sig(&signature),
-                deploy.id
-            ),
+            "dependency": dependency,
+            "note": match &dependency {
+                Some(label) => format!(
+                    "This began {after} after {label}, a program yours calls, was upgraded (transaction {}, incident #{}), so that change is the first suspect.",
+                    short_sig(&signature),
+                    deploy.id
+                ),
+                None => format!(
+                    "This began {after} after the program was upgraded (transaction {}, incident #{}), so the new code is the first suspect.",
+                    short_sig(&signature),
+                    deploy.id
+                ),
+            },
         }))
     }
 
@@ -1386,6 +1475,91 @@ impl Sentinel {
                 }),
             })
             .collect()
+    }
+
+    /// A program the monitored one calls was upgraded, changed hands or closed.
+    fn dependency_incident(
+        &self,
+        ps: &mut ProgramState,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        event: crate::posture::AuthorityEvent,
+        second: i64,
+    ) {
+        use crate::posture::Action;
+        let key = format!("{}:{}:{}", IncidentKind::DependencyChange.as_str(), tx.signature, event.path);
+        if ps.open.contains_key(&key) {
+            return;
+        }
+        let label = dependency_label(&event.program_id);
+        let severity = match &event.action {
+            Action::Close { .. } => Severity::Critical,
+            Action::SetAuthority { new_authority: Some(_) } => Severity::High,
+            Action::Upgrade { .. } => Severity::Medium,
+            _ => Severity::Low,
+        };
+        let calls = ps.deps.get(&event.program_id).map(|d| d.calls).unwrap_or(0);
+        let incident = Incident {
+            id: 0,
+            program_id: ps.program.program_id.clone(),
+            kind: IncidentKind::DependencyChange,
+            severity,
+            status: IncidentStatus::Open,
+            title: format!("{} · {}", event.headline().replace("Program", &label), ps.program.label),
+            summary: format!("{label}, which {} calls, changed: {}", ps.program.label, event.summary()),
+            explanation: format!(
+                "{} is called by {} ({calls} calls seen). {} If failures follow, the cause may be there and not in your own code.",
+                label,
+                ps.program.label,
+                event.explanation()
+            ),
+            source: "detector".into(),
+            metric: Some("dependency".into()),
+            observed: None,
+            peak: None,
+            baseline: None,
+            threshold: None,
+            onset_at: Some(tx.received_at),
+            detected_at: Utc::now(),
+            updated_at: Utc::now(),
+            resolved_at: None,
+            detection_latency_ms: Some((Utc::now() - tx.received_at).num_milliseconds().max(0)),
+            affected_count: 0,
+            affected_wallets: 0,
+            evidence: json!({ "authority": event, "dependency": { "program_id": event.program_id, "label": label, "calls_seen": calls } }),
+        };
+        if self.open_incident(ps, &key, incident, LinkFilter::Manual, true, i64::MAX, second).is_some() {
+            if let Some(open) = ps.open.get_mut(&key) {
+                link_tx(&self.writer, open, tx, summary, second);
+                open.dirty = true;
+            }
+        }
+    }
+
+    /// The programs this one calls, busiest first, with how often and whether they are watched.
+    pub fn dependencies(&self, program_id: &str) -> Option<serde_json::Value> {
+        let state = self.state.lock().unwrap();
+        let ps = state.programs.get(program_id)?;
+        let watched: HashSet<String> = watched_dependencies(ps).into_iter().collect();
+        let total: u64 = ps.deps.values().map(|d| d.calls).sum::<u64>().max(1);
+        let mut rows: Vec<_> = ps.deps.iter().collect();
+        rows.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then(a.0.cmp(b.0)));
+        let list: Vec<_> = rows
+            .into_iter()
+            .take(20)
+            .map(|(id, d)| {
+                json!({
+                    "program_id": id,
+                    "label": dependency_label(id),
+                    "calls": d.calls,
+                    "failed": d.failed,
+                    "share": d.calls as f64 / total as f64,
+                    "last_seen": ts(d.last_at),
+                    "watched_for_upgrades": watched.contains(id),
+                })
+            })
+            .collect();
+        Some(json!({ "dependencies": list }))
     }
 
     /// An upgrade, authority change or closure of the monitored program itself.
@@ -2301,6 +2475,7 @@ impl Sentinel {
             idl_loaded,
             posture: posture.as_ref(),
             vaults_watched: ps.program.detection.vaults.len(),
+            dependencies: ps.deps.values().filter(|d| d.calls >= MIN_DEP_CALLS).count(),
             now,
         }))
     }
@@ -2588,7 +2763,7 @@ fn vault_evidence(d: &Drain, symbol: &str) -> serde_json::Value {
 }
 
 /// Evidence keys set by detectors that `refresh_evidence` must not drop.
-const KEPT_EVIDENCE: [&str; 3] = ["authority", "deploy", "vault"];
+const KEPT_EVIDENCE: [&str; 4] = ["authority", "deploy", "vault", "dependency"];
 
 fn refresh_evidence(open: &mut OpenIncident, fps: &HashMap<String, Fingerprint>, labels: &HashMap<String, String>) {
     let total: u64 = open.fingerprint_counts.values().map(|(c, _)| c).sum();

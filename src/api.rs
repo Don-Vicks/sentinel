@@ -60,6 +60,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
         .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/dependencies", get(program_dependencies))
         .route("/api/programs/{id}/vaults", get(program_vaults).put(set_program_vaults))
         .route("/api/programs/{id}/summary", get(program_summary))
         .route("/api/incidents", get(list_incidents))
@@ -290,6 +291,11 @@ async fn metrics(State(s): State<AppState>, headers: axum::http::HeaderMap) -> R
         }
     }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], s.metrics_text()).into_response()
+}
+
+/// The programs this one calls, with how often.
+async fn program_dependencies(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(s.dependencies(&id).ok_or_else(|| not_found("program"))?))
 }
 
 /// The program's instructions with the accounts and arguments a rule can filter on.

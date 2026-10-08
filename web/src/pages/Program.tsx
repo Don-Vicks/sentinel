@@ -14,6 +14,7 @@ import { TxTable } from '../components/TxTable';
 import { PostureCard } from '../components/PostureCard';
 import { HealthCard } from '../components/HealthCard';
 import { FundsCard } from '../components/FundsCard';
+import { DependenciesCard } from '../components/DependenciesCard';
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
@@ -288,7 +289,10 @@ export function Program() {
         <HealthCard programId={id} />
         <PostureCard programId={id} incidents={data.incidents} />
       </div>
-      <FundsCard programId={id} />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <FundsCard programId={id} />
+        <DependenciesCard programId={id} />
+      </div>
 
       <Panel title="Instructions (last 5 min)">
         {s.instructions.length === 0 ? (

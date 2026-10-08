@@ -149,6 +149,8 @@ pub enum IncidentKind {
     AuthorityChange,
     /// A watched vault lost a large part of its balance.
     VaultDrain,
+    /// A program this one calls was upgraded or changed hands.
+    DependencyChange,
 }
 
 impl IncidentKind {
@@ -163,6 +165,7 @@ impl IncidentKind {
             Self::ErrorSpike => "error_spike",
             Self::AuthorityChange => "authority_change",
             Self::VaultDrain => "vault_drain",
+            Self::DependencyChange => "dependency_change",
         }
     }
 
@@ -181,6 +184,7 @@ impl IncidentKind {
             Self::ErrorSpike => "Error spike",
             Self::AuthorityChange => "Program upgrade or authority change",
             Self::VaultDrain => "Vault outflow",
+            Self::DependencyChange => "Dependency changed",
         }
     }
 }

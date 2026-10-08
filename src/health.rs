@@ -51,6 +51,8 @@ pub struct Inputs<'a> {
     pub posture: Option<&'a Posture>,
     /// How many vault accounts are being watched for drains.
     pub vaults_watched: usize,
+    /// Programs this one has been seen calling.
+    pub dependencies: usize,
     pub now: i64,
 }
 
@@ -199,6 +201,32 @@ fn coverage(idl_loaded: bool) -> Check {
     }
 }
 
+fn dependencies(i: &Inputs) -> Check {
+    if i.dependencies == 0 {
+        return unknown("dependencies", "Dependencies", 5, "No programs called yet, or none worth tracking.".into());
+    }
+    let changed = i.open.iter().filter(|inc| inc.kind == crate::model::IncidentKind::DependencyChange).count();
+    if changed > 0 {
+        check(
+            "dependencies",
+            "Dependencies",
+            5,
+            Status::Warn,
+            Some(60),
+            format!("{changed} program{} this one calls changed recently. If anything fails, look there first.", if changed == 1 { "" } else { "s" }),
+        )
+    } else {
+        check(
+            "dependencies",
+            "Dependencies",
+            5,
+            Status::Pass,
+            Some(100),
+            format!("Calls {} program{}; none has been upgraded recently.", i.dependencies, if i.dependencies == 1 { "" } else { "s" }),
+        )
+    }
+}
+
 fn funds(i: &Inputs) -> Check {
     if i.vaults_watched == 0 {
         return unknown(
@@ -255,6 +283,7 @@ pub fn evaluate(i: &Inputs) -> Health {
         liveness(i),
         compute(i.snapshot),
         funds(i),
+        dependencies(i),
         coverage(i.idl_loaded),
         authority(i.posture),
     ];
@@ -321,7 +350,7 @@ mod tests {
     }
 
     fn inputs<'a>(s: &'a ProgramSnapshot, open: &'a [Incident]) -> Inputs<'a> {
-        Inputs { snapshot: s, open, feed_stalled: false, idl_loaded: true, posture: None, vaults_watched: 0, now: 1_002 }
+        Inputs { snapshot: s, open, feed_stalled: false, idl_loaded: true, posture: None, vaults_watched: 0, dependencies: 0, now: 1_002 }
     }
 
     fn incident(sev: Severity) -> Incident {
@@ -342,7 +371,7 @@ mod tests {
         let h = evaluate(&inputs(&s, &[]));
         assert_eq!(h.status, "healthy", "{h:?}");
         assert!(h.score.unwrap() >= 95);
-        assert_eq!(h.checks.len(), 7);
+        assert_eq!(h.checks.len(), 8);
         // Authority wasn't read, so it is unknown and left out rather than passed.
         let a = h.checks.iter().find(|c| c.id == "authority").unwrap();
         assert_eq!((a.status, a.score), (Status::Unknown, None));

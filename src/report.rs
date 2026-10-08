@@ -116,6 +116,15 @@ pub fn diagnose(inc: &Incident, history: &[Incident]) -> Diagnosis {
             steps.push("Confirm this matches your release process: who signed, and was it approved?".into());
             steps.push("If it was not you, treat it as a security incident: rotate keys, pause integrations, and review the new authority.".into());
         }
+        IncidentKind::DependencyChange => {
+            signals += 2;
+            let label = inc.evidence["dependency"]["label"].as_str().unwrap_or("a dependency");
+            likely_cause = Some(format!("{label}, a program this one calls, changed on chain."));
+            evidence.push(inc.summary.clone());
+            steps.push(format!("Check whether your recent failures are raised inside {label} (the incident's failure fingerprints show which program raised each error)."));
+            steps.push(format!("Read {label}'s announcements for what changed, and re-test your integration against it."));
+            steps.push("If your own program is still healthy, no action may be needed; this is a heads-up.".into());
+        }
         IncidentKind::VaultDrain => {
             signals += 1;
             let v = &inc.evidence["vault"];

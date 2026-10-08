@@ -216,6 +216,12 @@ fn tools() -> Vec<Tool> {
             write: false,
         },
         Tool {
+            name: "list_dependencies",
+            description: "The programs a program calls (oracles, AMMs, ...), how often, and which are watched for upgrades.",
+            schema: object(json!({ "program": program }), &["program"]),
+            write: false,
+        },
+        Tool {
             name: "list_rules",
             description: "The token owner's alert rules (secrets are masked).",
             schema: object(json!({}), &[]),
@@ -524,6 +530,10 @@ async fn run_tool(s: &Arc<Sentinel>, ctx: &Ctx, name: &str, args: &Value) -> Res
         "list_vaults" => {
             let id = resolve_program(s, str_arg(args, "program")?)?;
             json_out(s.vault_status(&id).ok_or("program not monitored")?)
+        }
+        "list_dependencies" => {
+            let id = resolve_program(s, str_arg(args, "program")?)?;
+            json_out(s.dependencies(&id).ok_or("program not monitored")?)
         }
         "list_rules" => {
             let rules: Vec<_> = s

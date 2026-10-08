@@ -68,6 +68,7 @@ export const KIND_LABEL: Record<string, string> = {
   error_spike: 'Error spike',
   authority_change: 'Program change',
   vault_drain: 'Vault outflow',
+  dependency_change: 'Dependency change',
 };
 
 export const explorer = (sig: string) => `https://solscan.io/tx/${sig}`;

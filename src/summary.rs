@@ -149,7 +149,7 @@ fn incident_ref(i: &Incident) -> IncidentRef {
 
 /// Kinds that mean the program was unhealthy, as opposed to something happening to it.
 fn is_reliability(kind: IncidentKind) -> bool {
-    !matches!(kind, IncidentKind::AuthorityChange | IncidentKind::LargeTransfer)
+    !matches!(kind, IncidentKind::AuthorityChange | IncidentKind::DependencyChange | IncidentKind::LargeTransfer)
 }
 
 /// Total seconds covered by the union of `[start, end)` intervals.
@@ -294,7 +294,7 @@ pub fn build(store: &Store, program_id: &str, label: &str, now: i64, period_secs
     let reliability = reliability(&incidents, from, now);
     let program_changes: Vec<IncidentRef> = incidents
         .iter()
-        .filter(|i| i.kind == IncidentKind::AuthorityChange && i.detected_at.timestamp() >= from && i.detected_at.timestamp() < now)
+        .filter(|i| matches!(i.kind, IncidentKind::AuthorityChange | IncidentKind::DependencyChange) && i.detected_at.timestamp() >= from && i.detected_at.timestamp() < now)
         .map(incident_ref)
         .collect();
 
