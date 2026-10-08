@@ -516,6 +516,77 @@ pub enum Condition {
         kinds: Vec<IncidentKind>,
         min_severity: Severity,
     },
+    /// A call to an instruction, matched on its decoded name, arguments and accounts.
+    Instruction {
+        /// Instruction names to match, separated by `,` or `|`: `withdraw`, `set_*|update_*`.
+        /// Case, underscores and dashes are ignored, so `SetAuthority` matches `set_authority`.
+        /// Empty matches every instruction.
+        #[serde(default)]
+        name: String,
+        /// Which program's instruction. Default: the monitored program.
+        #[serde(default)]
+        program_id: Option<String>,
+        /// Conditions on `args.<field>`, `accounts.<name>`, `signer` or `instruction`.
+        #[serde(default)]
+        filters: Vec<ArgFilter>,
+        #[serde(default)]
+        match_mode: MatchMode,
+        /// Only successful calls (the default). A failed call changed nothing on chain.
+        #[serde(default = "yes_default")]
+        success_only: bool,
+        /// Only when the signer has never called a matching instruction before.
+        #[serde(default)]
+        first_seen_signer: bool,
+    },
+}
+
+fn yes_default() -> bool {
+    true
+}
+
+/// One condition on a decoded instruction: `args.amount > 1000000000`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ArgFilter {
+    pub path: String,
+    pub op: FilterOp,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FilterOp {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+    /// Text contains the value, or a list holds it.
+    Contains,
+}
+
+impl FilterOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Eq => "=",
+            Self::Ne => "≠",
+            Self::Gt => ">",
+            Self::Gte => "≥",
+            Self::Lt => "<",
+            Self::Lte => "≤",
+            Self::Contains => "contains",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// Every filter must hold.
+    #[default]
+    All,
+    /// At least one filter holds.
+    Any,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

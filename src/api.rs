@@ -59,6 +59,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/transactions", get(program_transactions))
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
+        .route("/api/programs/{id}/idl", get(program_idl))
         .route("/api/programs/{id}/vaults", get(program_vaults).put(set_program_vaults))
         .route("/api/programs/{id}/summary", get(program_summary))
         .route("/api/incidents", get(list_incidents))
@@ -277,6 +278,17 @@ async fn program_posture(State(s): State<AppState>, Path(id): Path<String>) -> A
         .await
         .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, crate::redact::scrub(&e.to_string())))?;
     Ok(Json(json!(posture)))
+}
+
+/// The program's instructions with the accounts and arguments a rule can filter on.
+async fn program_idl(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_monitored(&id) {
+        return Err(not_found("program"));
+    }
+    Ok(Json(match s.idls.get(&id).await {
+        Some(idl) => json!({ "loaded": true, "name": idl.name, "instructions": idl.schema() }),
+        None => json!({ "loaded": false, "name": null, "instructions": [] }),
+    }))
 }
 
 async fn program_health(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {

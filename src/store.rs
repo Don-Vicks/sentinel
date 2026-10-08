@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     created_at TEXT NOT NULL,
     last_used_at TEXT
 );
+-- Wallets that have called an instruction before, for "first time this signer" rules.
+CREATE TABLE IF NOT EXISTS signers_seen (
+    program_id TEXT NOT NULL,
+    instruction TEXT NOT NULL,
+    signer TEXT NOT NULL,
+    first_seen TEXT NOT NULL,
+    PRIMARY KEY (program_id, instruction, signer)
+);
 CREATE TABLE IF NOT EXISTS summary_schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data TEXT NOT NULL
@@ -250,6 +258,17 @@ impl Store {
             .unwrap()
             .execute("DELETE FROM sessions WHERE token_hash = ?1", [token_hash])?;
         Ok(())
+    }
+
+    // --- signers seen ---
+
+    /// Records that `signer` called `instruction`. True when this is the first time.
+    pub fn mark_signer_seen(&self, program_id: &str, instruction: &str, signer: &str) -> Result<bool> {
+        let n = self.conn.lock().unwrap().execute(
+            "INSERT OR IGNORE INTO signers_seen(program_id, instruction, signer, first_seen) VALUES (?1, ?2, ?3, ?4)",
+            params![program_id, instruction, signer, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n == 1)
     }
 
     // --- API tokens ---

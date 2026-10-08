@@ -14,6 +14,7 @@ pub mod detect;
 pub mod engine;
 pub mod health;
 pub mod idl;
+pub mod instruction_rule;
 pub mod limits;
 pub mod live;
 pub mod mcp;

@@ -302,6 +302,65 @@ impl Idl {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ArgSchema {
+    /// Where a rule filter finds it: `args.amount`, `args.params.min_out`.
+    pub path: String,
+    pub r#type: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstructionSchema {
+    pub name: String,
+    pub accounts: Vec<String>,
+    pub args: Vec<ArgSchema>,
+}
+
+/// "u64", "pubkey", "option<u64>", "vec<u8>", or the name of a defined type.
+fn type_label(ty: &Value) -> String {
+    match ty {
+        Value::String(s) => if s == "publicKey" { "pubkey".to_string() } else { s.clone() },
+        Value::Object(o) => {
+            if let Some(inner) = o.get("option").or_else(|| o.get("coption")) {
+                format!("option<{}>", type_label(inner))
+            } else if let Some(inner) = o.get("vec") {
+                format!("vec<{}>", type_label(inner))
+            } else if let Some(arr) = o.get("array").and_then(Value::as_array) {
+                format!("[{}; {}]", arr.first().map(type_label).unwrap_or_default(), arr.get(1).map(|n| n.to_string()).unwrap_or_default())
+            } else if let Some(d) = o.get("defined") {
+                d.as_str().map(str::to_string).or_else(|| d["name"].as_str().map(str::to_string)).unwrap_or_else(|| "struct".into())
+            } else {
+                "object".into()
+            }
+        }
+        _ => "unknown".into(),
+    }
+}
+
+impl Idl {
+    /// What a rule can filter on: each instruction's accounts and arguments, struct arguments one level deep.
+    pub fn schema(&self) -> Vec<InstructionSchema> {
+        self.instructions
+            .iter()
+            .map(|ix| {
+                let mut args = Vec::new();
+                for (name, ty) in &ix.args {
+                    args.push(ArgSchema { path: format!("args.{name}"), r#type: type_label(ty) });
+                    let defined = ty.get("defined").and_then(|d| d.as_str().or_else(|| d["name"].as_str()));
+                    if let Some(fields) = defined.and_then(|d| self.types.get(d)).and_then(|t| t["fields"].as_array()) {
+                        for f in fields {
+                            if let (Some(field), Some(fty)) = (f["name"].as_str(), f.get("type")) {
+                                args.push(ArgSchema { path: format!("args.{name}.{field}"), r#type: type_label(fty) });
+                            }
+                        }
+                    }
+                }
+                InstructionSchema { name: ix.name.clone(), accounts: ix.accounts.clone(), args }
+            })
+            .collect()
+    }
+}
+
 /// Fetches and caches IDLs per program (including "has no IDL").
 pub struct IdlRegistry {
     rpc: Option<Arc<RpcClient>>,

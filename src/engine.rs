@@ -50,6 +50,8 @@ pub struct Sentinel {
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     /// Who can upgrade each program, read from chain and kept for a few minutes.
     postures: Mutex<HashMap<String, (std::time::Instant, crate::posture::Posture)>>,
+    /// (program, instruction, signer) combinations already recorded as seen.
+    seen_signers: Mutex<HashSet<String>>,
     pub auth: crate::auth::Auth,
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
@@ -245,6 +247,7 @@ impl Sentinel {
             chain_tip: Mutex::new((0, 0)),
             rpc_txs: Mutex::new(HashMap::new()),
             postures: Mutex::new(HashMap::new()),
+            seen_signers: Mutex::new(HashSet::new()),
             auth,
             limits: crate::limits::Limits::from_env(),
             prices,
@@ -441,6 +444,9 @@ impl Sentinel {
                         );
                         alerts.extend(self.fire_rule(ps, rule, msg, t.amount, LinkFilter::Manual, true, second, Some((&tx, &summary))));
                     }
+                }
+                if matches!(rule.condition, Condition::Instruction { .. }) {
+                    alerts.extend(self.instruction_rule(ps, rule, &tx, &summary, second));
                 }
                 if let Condition::TransferUsd { min_usd } = &rule.condition {
                     let best = tx
@@ -1061,6 +1067,82 @@ impl Sentinel {
         Ok(())
     }
 
+    /// True the first time `signer` is seen calling `instruction` on `program`.
+    fn note_signer(&self, program: &str, instruction: &str, signer: &str) -> bool {
+        let key = format!("{program}|{}|{signer}", crate::instruction_rule::normalize(instruction));
+        let mut seen = self.seen_signers.lock().unwrap();
+        if seen.contains(&key) {
+            return false;
+        }
+        if seen.len() >= 200_000 {
+            seen.clear();
+        }
+        seen.insert(key);
+        drop(seen);
+        // A database that can't be written is treated as "seen": better silent than a flood.
+        self.store
+            .mark_signer_seen(program, &crate::instruction_rule::normalize(instruction), signer)
+            .unwrap_or(false)
+    }
+
+    /// Matches an instruction rule against the transaction; the alert, if it fires.
+    #[allow(clippy::too_many_arguments)]
+    fn instruction_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        use crate::instruction_rule as ir;
+        let Condition::Instruction { name, program_id, filters, match_mode, success_only, first_seen_signer } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        let target = program_id.clone().filter(|p| !p.is_empty()).unwrap_or_else(|| ps.program.program_id.clone());
+        if !tx.touches(&target) {
+            return None;
+        }
+        let idl = self.idls.cached(&target);
+        if idl.is_none() {
+            self.idls.request(&target);
+        }
+        let needs_args = filters.iter().any(|f| f.path.starts_with("args") || f.path.starts_with("accounts"));
+        let warmed = ps.window.age(second) >= ps.program.detection.warmup_secs as i64;
+        for call in ir::calls(tx, &target, idl.as_deref()) {
+            if !ir::name_matches(name, &call.name) {
+                continue;
+            }
+            // Without the IDL the arguments are unknown, so a rule about them can't be judged yet.
+            if needs_args && !call.decoded {
+                continue;
+            }
+            let signer = tx.fee_payer().unwrap_or_default().to_string();
+            if *first_seen_signer {
+                let new = self.note_signer(&target, &call.name, &signer);
+                // Right after start-up everyone looks new; learn who they are first.
+                if !new || !warmed {
+                    continue;
+                }
+            }
+            let Some(seen) = ir::filters_hold(&call.root, filters, *match_mode) else { continue };
+            let label = if call.name.is_empty() { "instruction".to_string() } else { call.name.clone() };
+            let msg = format!(
+                "{label} called by {} in {}{}{}",
+                short_sig(&signer),
+                short_sig(&tx.signature),
+                if seen.is_empty() { String::new() } else { format!(" ({})", seen.join(", ")) },
+                if *first_seen_signer { ", the first time this wallet has called it" } else { "" }
+            );
+            let value = ir::headline_value(&call.root, filters);
+            return self.fire_rule(ps, rule, msg, value, LinkFilter::Manual, true, second, Some((tx, summary)));
+        }
+        None
+    }
+
     /// Adds one transaction to the hour's rollup, starting a new hour when needed.
     fn record_rollup(
         &self,
@@ -1335,7 +1417,7 @@ impl Sentinel {
                 Condition::Metric { value, window_secs, .. } => (Some(*value), *window_secs as i64),
                 Condition::Transfer { min_amount, .. } => (Some(*min_amount), 60),
                 Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
-                Condition::Incident { .. } => (None, 60),
+                Condition::Incident { .. } | Condition::Instruction { .. } => (None, 60),
             };
             let incident = Incident {
                 id: 0,

@@ -252,7 +252,31 @@ export type Condition =
   | { type: 'metric'; metric: Metric; op: '>' | '>=' | '<' | '<='; value: number; window_secs: number }
   | { type: 'transfer'; mint: string | null; min_amount: number }
   | { type: 'transfer_usd'; min_usd: number }
-  | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity };
+  | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity }
+  | {
+      type: 'instruction';
+      name: string;
+      program_id?: string | null;
+      filters: ArgFilter[];
+      match_mode: 'all' | 'any';
+      success_only: boolean;
+      first_seen_signer: boolean;
+    };
+
+export type FilterOp = 'eq' | 'ne' | 'gt' | 'gte' | 'lt' | 'lte' | 'contains';
+
+export interface ArgFilter {
+  /** `args.amount`, `accounts.authority`, `signer` or `instruction`. */
+  path: string;
+  op: FilterOp;
+  value: string | number | boolean;
+}
+
+export interface InstructionSchema {
+  name: string;
+  accounts: string[];
+  args: { path: string; type: string }[];
+}
 
 export type ChannelType = 'slack' | 'telegram' | 'pagerduty' | 'discord' | 'webhook';
 
