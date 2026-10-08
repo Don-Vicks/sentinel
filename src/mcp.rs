@@ -262,6 +262,19 @@ Give `channels` (slack/telegram/pagerduty/discord/webhook) or `channels_from_rul
             write: true,
         },
         Tool {
+            name: "protect_program",
+            description: "Set up the alerts most teams want for a program on the channels given (or copied from one of your rules with channels_from_rule): any incident of high severity or above, failure rate above 20%, an admin instruction from a new wallet, health below 60, and Sentinel's own feed problems. Rules that already exist are left alone. Returns what was created and what to do next.",
+            schema: object(
+                json!({
+                    "program": program,
+                    "channels": { "type": "array", "items": { "type": "object" } },
+                    "channels_from_rule": { "type": "integer", "description": "Reuse the channels of one of your rules." }
+                }),
+                &["program"],
+            ),
+            write: true,
+        },
+        Tool {
             name: "test_rule",
             description: "Send a test delivery through a rule's channels.",
             schema: object(json!({ "id": { "type": "integer" } }), &["id"]),
@@ -590,6 +603,14 @@ async fn run_tool(s: &Arc<Sentinel>, ctx: &Ctx, name: &str, args: &Value) -> Res
             }
             let input: RuleInput = serde_json::from_value(Value::Object(input)).map_err(|e| format!("Invalid rule: {e}"))?;
             json_out(api::create_rule_inner(s, account.to_string(), input).await.map_err(api_err)?)
+        }
+        "protect_program" => {
+            let id = resolve_program(s, str_arg(args, "program")?)?;
+            let channels: Vec<crate::model::Channel> = match args.get("channels").filter(|c| !c.is_null()) {
+                Some(c) => serde_json::from_value(c.clone()).map_err(|e| format!("Invalid channels: {e}"))?,
+                None => Vec::new(),
+            };
+            json_out(api::protect_inner(s, account, &id, channels, args["channels_from_rule"].as_i64()).await.map_err(api_err)?)
         }
         "test_rule" => {
             let id = id_arg(args, "id")?;

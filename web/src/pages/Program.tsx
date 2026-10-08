@@ -16,6 +16,7 @@ import { HealthCard } from '../components/HealthCard';
 import { FundsCard } from '../components/FundsCard';
 import { DependenciesCard } from '../components/DependenciesCard';
 import { MuteControl } from '../components/MuteControl';
+import { ProtectCard } from '../components/ProtectCard';
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
@@ -295,6 +296,8 @@ export function Program() {
         <HealthCard programId={id} />
         <PostureCard programId={id} incidents={data.incidents} />
       </div>
+      <ProtectCard programId={id} />
+
       <div className="grid gap-4 xl:grid-cols-2">
         <FundsCard programId={id} />
         <DependenciesCard programId={id} />

@@ -217,3 +217,55 @@ async fn summary_schedules_are_validated_masked_and_private() {
     assert_eq!(st, StatusCode::OK);
     let _ = std::fs::remove_file(&db);
 }
+
+#[tokio::test]
+async fn protect_this_program_creates_the_usual_rules_once() {
+    let db = std::env::temp_dir().join(format!("sentinel-protect-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let store = Arc::new(Store::open(db.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(4);
+    let s = Sentinel::new(store.clone(), Arc::new(NullSource(bus)), None, PriceBook::new(), "https://sentinel.example".into()).unwrap();
+    let app = sentinel::api::router(s);
+    let cookie = sign_in(&app, &Keypair::new()).await;
+    const PUMP: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+    let path = format!("/api/programs/{PUMP}/protect");
+    let telegram = json!({ "type": "telegram", "bot_token": BOT_TOKEN, "chat_id": "-1001234567890" });
+
+    // It has to be a program you watch, and it needs somewhere to send alerts.
+    let (st, _, _) = call(&app, "POST", &path, Some(&cookie), Some(json!({ "channels": [telegram] }))).await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    call(&app, "POST", "/api/programs", Some(&cookie), Some(json!({ "program_id": PUMP }))).await;
+    let (st, body, _) = call(&app, "POST", &path, Some(&cookie), Some(json!({}))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{body}");
+
+    let (st, done, _) = call(&app, "POST", &path, Some(&cookie), Some(json!({ "channels": [telegram] }))).await;
+    assert_eq!(st, StatusCode::OK, "{done}");
+    let names: Vec<&str> = done["created"].as_array().unwrap().iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names.len(), 5, "{names:?}");
+    for want in ["any incident of high severity", "failure rate above 20%", "admin instruction from a new wallet", "health score below 60", "Sentinel feed problems"] {
+        assert!(names.iter().any(|n| n.contains(want)), "{want} in {names:?}");
+    }
+    assert!(!done.to_string().contains(BOT_TOKEN), "secrets stay masked");
+    assert!(done["next_steps"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("vault")));
+    let rules = store.rules().unwrap();
+    assert_eq!(rules.len(), 5);
+    assert!(rules.iter().all(|r| r.channels.len() == 1 && r.has_targets()));
+    assert!(rules.iter().any(|r| matches!(r.condition, sentinel::model::Condition::Instruction { first_seen_signer: true, .. })));
+
+    // Running it again changes nothing.
+    let (_, again, _) = call(&app, "POST", &path, Some(&cookie), Some(json!({ "channels": [telegram] }))).await;
+    assert_eq!(again["created"], json!([]));
+    assert_eq!(again["already_had"].as_array().unwrap().len(), 5);
+    assert_eq!(store.rules().unwrap().len(), 5);
+
+    // Channels can be copied from an existing rule, so the secret never travels again.
+    let first = rules[0].id;
+    let other = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4";
+    call(&app, "POST", "/api/programs", Some(&cookie), Some(json!({ "program_id": other }))).await;
+    let (st, copied, _) = call(&app, "POST", &format!("/api/programs/{other}/protect"), Some(&cookie), Some(json!({ "channels_from_rule": first }))).await;
+    assert_eq!(st, StatusCode::OK, "{copied}");
+    let new_rules: Vec<_> = store.rules().unwrap().into_iter().filter(|r| r.program_id.as_deref() == Some(other)).collect();
+    assert_eq!(new_rules.len(), 4, "the feed rule already exists");
+    assert!(matches!(&new_rules[0].channels[0].kind, ChannelKind::Telegram { bot_token, .. } if bot_token == BOT_TOKEN));
+    let _ = std::fs::remove_file(&db);
+}

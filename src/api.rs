@@ -60,6 +60,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
         .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/protect", post(protect_program))
         .route("/api/programs/{id}/mute", axum::routing::put(mute_program))
         .route("/api/programs/{id}/dependencies", get(program_dependencies))
         .route("/api/programs/{id}/vaults", get(program_vaults).put(set_program_vaults))
@@ -371,6 +372,119 @@ async fn metrics(State(s): State<AppState>, headers: axum::http::HeaderMap) -> R
         }
     }
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], s.metrics_text()).into_response()
+}
+
+/// Names that usually mean someone is changing how a program works or taking money out.
+pub const ADMIN_INSTRUCTIONS: &str = "set_*|update_*|withdraw*|pause*|unpause*|*authority*|*admin*|upgrade*|close*";
+
+#[derive(Deserialize)]
+struct ProtectInput {
+    #[serde(default)]
+    channels: Vec<Channel>,
+    /// Reuse the channels of one of your rules instead, so no secret has to be sent again.
+    channels_from_rule: Option<i64>,
+}
+
+async fn protect_program(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Path(id): Path<String>,
+    Json(body): Json<ProtectInput>,
+) -> ApiResult<Value> {
+    Ok(Json(protect_inner(&s, &account, &id, body.channels, body.channels_from_rule).await?))
+}
+
+/// Creates the rules most teams want for a program, on the channels given. Rules that already
+/// exist (same name, same program) are left alone, so running it twice changes nothing.
+pub(crate) async fn protect_inner(
+    s: &Sentinel,
+    account: &str,
+    program_id: &str,
+    mut channels: Vec<Channel>,
+    reuse: Option<i64>,
+) -> Result<Value, ApiError> {
+    if !s.is_watching(account, program_id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    if let Some(from) = reuse {
+        let source = s
+            .store
+            .rules()?
+            .into_iter()
+            .find(|r| r.id == from && r.owner.as_deref() == Some(account))
+            .ok_or_else(|| not_found("rule"))?;
+        channels = source.targets();
+    }
+    if channels.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Choose where alerts should go: add a channel, or reuse one from an existing rule".into()));
+    }
+    let label = s.program_labels().get(program_id).cloned().unwrap_or_else(|| program_id.to_string());
+    let existing: Vec<String> = s
+        .store
+        .rules()?
+        .into_iter()
+        .filter(|r| r.owner.as_deref() == Some(account))
+        .map(|r| format!("{}|{}", r.program_id.as_deref().unwrap_or(""), r.name))
+        .collect();
+
+    let plan: Vec<(Option<&str>, String, Value, &str, bool)> = vec![
+        (
+            Some(program_id),
+            format!("{label}: any incident of high severity or above"),
+            json!({ "type": "incident", "kinds": [], "min_severity": "high" }),
+            "high",
+            false,
+        ),
+        (
+            Some(program_id),
+            format!("{label}: failure rate above 20%"),
+            json!({ "type": "metric", "metric": "failure_rate", "op": ">", "value": 20, "window_secs": 60 }),
+            "high",
+            true,
+        ),
+        (
+            Some(program_id),
+            format!("{label}: admin instruction from a new wallet"),
+            json!({ "type": "instruction", "name": ADMIN_INSTRUCTIONS, "filters": [], "match_mode": "all", "success_only": true, "first_seen_signer": true }),
+            "critical",
+            true,
+        ),
+        (
+            Some(program_id),
+            format!("{label}: health score below 60"),
+            json!({ "type": "health", "below": 60 }),
+            "high",
+            true,
+        ),
+        (None, "Sentinel feed problems".to_string(), json!({ "type": "system", "kinds": [] }), "high", false),
+    ];
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for (program, name, condition, severity, create_incident) in plan {
+        if existing.contains(&format!("{}|{name}", program.unwrap_or(""))) {
+            skipped.push(name);
+            continue;
+        }
+        let input: RuleInput = serde_json::from_value(json!({
+            "name": name, "program_id": program, "condition": condition, "severity": severity,
+            "create_incident": create_incident, "channels": channels,
+        }))
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("Invalid channel: {e}")))?;
+        created.push(create_rule_inner(s, account.to_string(), input).await?);
+    }
+    let vaults = s.vault_status(program_id).unwrap_or(Value::Null);
+    let posture = s.posture(program_id).await.ok();
+    let mut next = Vec::new();
+    if vaults["vaults"].as_array().is_none_or(|v| v.is_empty()) {
+        next.push("Name the program's vault or treasury accounts on its page so a drain opens an incident.".to_string());
+    }
+    if posture.as_ref().is_some_and(|p| p.authority_kind == "single_key") {
+        next.push("One wallet can upgrade this program; move its upgrade authority to a multisig.".to_string());
+    }
+    if s.idls.cached(program_id).is_none() {
+        next.push("No Anchor IDL was found, so instruction rules can match names but not arguments.".to_string());
+    }
+    Ok(json!({ "created": created, "already_had": skipped, "next_steps": next }))
 }
 
 #[derive(Deserialize)]
