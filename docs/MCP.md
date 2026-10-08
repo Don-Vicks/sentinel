@@ -57,6 +57,8 @@ Change (write token):
 | `test_rule` | Send a test delivery through a rule |
 | `update_incident_status` | Mark an incident investigating or resolved |
 | `set_vaults` | Replace the vaults watched for drains |
+| `suggest_rules` | Rules worth having for a program, read from its Anchor IDL (authority and admin changes, pause controls, funds leaving, configuration changes, the events announcing them), each with a reason. Read-only |
+| `apply_suggestions` | Create chosen suggestions by id on the channels given or copied with `channels_from_rule`; a size threshold goes in `values` |
 | `protect_program` | Create the usual rules (high-severity incidents, failure rate, admin call from a new wallet, health, feed problems) on the channels given or copied with `channels_from_rule`; rules you already have are left alone |
 | `mute_program` | Hold notifications for a program for a while (a deploy); incidents are still recorded. 0 minutes lifts it |
 | `send_summary_now` | Deliver a scheduled summary immediately |

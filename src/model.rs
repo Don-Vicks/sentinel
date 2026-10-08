@@ -218,6 +218,8 @@ impl IncidentKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
+    /// Worth knowing, not worth acting on: a Squads vote, a routine event.
+    Info,
     Low,
     Medium,
     High,

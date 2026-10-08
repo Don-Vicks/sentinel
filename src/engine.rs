@@ -2310,6 +2310,7 @@ impl Sentinel {
             for ps in state.programs.values() {
                 for open in ps.open.values() {
                     let sev = match open.incident.severity {
+                        Severity::Info => "info",
                         Severity::Low => "low",
                         Severity::Medium => "medium",
                         Severity::High => "high",

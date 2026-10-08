@@ -16,6 +16,7 @@ import { HealthCard } from '../components/HealthCard';
 import { FundsCard } from '../components/FundsCard';
 import { DependenciesCard } from '../components/DependenciesCard';
 import { MuteControl } from '../components/MuteControl';
+import { SuggestionsCard } from '../components/SuggestionsCard';
 import { EventsCard } from '../components/EventsCard';
 import { ProtectCard } from '../components/ProtectCard';
 import { SummaryView } from './Summary';
@@ -23,7 +24,7 @@ import { SummaryView } from './Summary';
 const TABS = ['overview', 'activity', 'security', 'summary'] as const;
 type Tab = (typeof TABS)[number];
 
-const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+const SEVERITY_RANK: Record<Severity, number> = { info: -1, low: 0, medium: 1, high: 2, critical: 3 };
 
 function bucket(points: SeriesPoint[], size: number) {
   const out: { tx: number; failed: number; cu: number; cu_n: number }[] = [];
@@ -465,6 +466,7 @@ export function Program() {
         <div role="tabpanel" id="panel-security" aria-labelledby="tab-security" className="space-y-6">
         <PostureCard programId={id} incidents={data.incidents} />
         <ProtectCard programId={id} />
+        <SuggestionsCard programId={id} />
 
         <div className="grid gap-4 xl:grid-cols-2">
           <FundsCard programId={id} />

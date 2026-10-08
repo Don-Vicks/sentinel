@@ -8,6 +8,7 @@ const STRIPE: Record<Severity, string> = {
   high: 'border-l-serious',
   medium: 'border-l-warn',
   low: 'border-l-line-strong',
+  info: 'border-l-transparent',
 };
 
 /** A count column in the issue stream: big number, small unit. */

@@ -1,4 +1,4 @@
-export type Severity = 'low' | 'medium' | 'high' | 'critical';
+export type Severity = 'info' | 'low' | 'medium' | 'high' | 'critical';
 export type IncidentStatus = 'open' | 'investigating' | 'resolved';
 export type IncidentKind =
   | 'failure_spike'

@@ -321,7 +321,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <div className="md:col-span-2">
             <label className="sr-only" htmlFor="rule-min-sev">Minimum severity</label>
             <select id="rule-min-sev" className="input" value={minSeverity} onChange={(e) => setMinSeverity(e.target.value as Severity)}>
-              {(['low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+              {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
         ) : (
@@ -452,7 +452,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         <div>
           <label className="label" htmlFor="rule-severity">Severity</label>
           <select id="rule-severity" className="input" value={severity} onChange={(e) => setSeverity(e.target.value as Severity)}>
-            {(['low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+            {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <div>
