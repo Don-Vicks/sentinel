@@ -48,6 +48,10 @@ pub struct Sentinel {
     chain_tip: Mutex<(u64, i64)>,
     /// RPC polls that failed in a row.
     rpc_failures: std::sync::atomic::AtomicU32,
+    /// Programs waiting for their recent history to be loaded, and the ones already done.
+    backfill_queue: tokio::sync::mpsc::UnboundedSender<String>,
+    backfill_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
+    backfilled: Mutex<HashSet<String>>,
     /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     /// Who can upgrade each program, read from chain and kept for a few minutes.
@@ -88,6 +92,18 @@ struct State {
 const STALL_SECS: i64 = 15;
 /// How long after an upgrade a new incident is attributed to it.
 const DEPLOY_WINDOW_SECS: i64 = 30 * 60;
+/// How far back history is loaded, and the most transactions fetched, and the time allowed.
+const BACKFILL_SECS: i64 = 900;
+const BACKFILL_MAX_TX: usize = 1500;
+const BACKFILL_BUDGET_SECS: u64 = 40;
+
+/// What loading a program's recent history found.
+#[derive(Debug, Clone, Copy)]
+pub struct BackfillReport {
+    pub transactions: usize,
+    /// Span of time the history covers.
+    pub seconds: i64,
+}
 /// RPC polls (every 5 seconds) that must fail in a row before it is announced.
 const RPC_FAILURES_BEFORE_ALERT: u32 = 3;
 /// Least time between two announcements of the same system problem.
@@ -244,6 +260,7 @@ impl Sentinel {
             ps.watchers.insert(SYSTEM.to_string());
         }
         let idls = IdlRegistry::new(rpc.clone());
+        let (backfill_queue, backfill_inbox) = tokio::sync::mpsc::unbounded_channel();
         let auth = crate::auth::Auth::new(store.clone(), &public_url);
         let store_for_writer = store.clone();
         let this = Arc::new(Self {
@@ -255,6 +272,9 @@ impl Sentinel {
             beam: crate::beam::BeamClient::new(),
             chain_tip: Mutex::new((0, 0)),
             rpc_failures: std::sync::atomic::AtomicU32::new(0),
+            backfill_queue,
+            backfill_inbox: Mutex::new(Some(backfill_inbox)),
+            backfilled: Mutex::new(HashSet::new()),
             rpc_txs: Mutex::new(HashMap::new()),
             postures: Mutex::new(HashMap::new()),
             seen_signers: Mutex::new(HashSet::new()),
@@ -299,6 +319,26 @@ impl Sentinel {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }
             });
+        }
+        // Load each program's recent history so detectors have a baseline from the first minute.
+        if self.rpc.is_some() {
+            if let Some(mut inbox) = self.backfill_inbox.lock().unwrap().take() {
+                for id in self.state.lock().unwrap().programs.keys() {
+                    let _ = self.backfill_queue.send(id.clone());
+                }
+                let this = self.clone();
+                tokio::spawn(async move {
+                    while let Some(program) = inbox.recv().await {
+                        if !this.backfilled.lock().unwrap().insert(program.clone()) {
+                            continue;
+                        }
+                        match this.backfill(&program).await {
+                            Ok(report) => tracing::info!(%program, transactions = report.transactions, seconds = report.seconds, "loaded recent history"),
+                            Err(e) => tracing::warn!(%program, error = %e, "could not load recent history"),
+                        }
+                    }
+                });
+            }
         }
         // Scheduled summaries go out at their hour, a minute's resolution is plenty.
         {
@@ -2033,6 +2073,156 @@ impl Sentinel {
         Ok(Some(crate::report::markdown(&incident, &label, &txs, &history, &self.incident_link(id))))
     }
 
+    /// Loads the last few minutes of the program's transactions over RPC, so the detectors
+    /// start with a real baseline instead of waiting several minutes to learn one. History goes
+    /// through the same decoding as live traffic but raises no incidents or alerts.
+    pub async fn backfill(&self, program_id: &str) -> Result<BackfillReport> {
+        use solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config;
+        use solana_sdk::commitment_config::CommitmentConfig;
+        let Some(rpc) = self.rpc.clone() else { bail!("needs a Solana RPC") };
+        let address = solana_sdk::pubkey::Pubkey::try_from(program_id).map_err(|_| anyhow::anyhow!("not a valid program address"))?;
+        let started = Utc::now().timestamp();
+        // Live data wins: only history from before the first live transaction is wanted.
+        let live_from = {
+            let state = self.state.lock().unwrap();
+            let ps = state.programs.get(program_id).ok_or_else(|| anyhow::anyhow!("program not monitored"))?;
+            ps.window.first_second.unwrap_or(started)
+        };
+        let since = started - BACKFILL_SECS;
+
+        let mut signatures = Vec::new();
+        let mut before = None;
+        for _ in 0..3 {
+            let page = rpc
+                .get_signatures_for_address_with_config(
+                    &address,
+                    GetConfirmedSignaturesForAddress2Config {
+                        before: before.as_ref().and_then(|s: &String| s.parse().ok()),
+                        until: None,
+                        limit: Some(1000),
+                        commitment: Some(CommitmentConfig::confirmed()),
+                    },
+                )
+                .await?;
+            let Some(last) = page.last() else { break };
+            before = Some(last.signature.clone());
+            let reached_start = last.block_time.is_some_and(|t| t < since);
+            signatures.extend(page);
+            if reached_start || signatures.len() >= BACKFILL_MAX_TX {
+                break;
+            }
+        }
+        let wanted: Vec<String> = signatures
+            .into_iter()
+            .filter(|s| s.block_time.is_some_and(|t| t >= since && t < live_from))
+            .map(|s| s.signature)
+            .take(BACKFILL_MAX_TX)
+            .collect();
+        if wanted.is_empty() {
+            return Ok(BackfillReport { transactions: 0, seconds: 0 });
+        }
+
+        // Newest signatures come first; fetch a dozen at a time and stop if it drags on.
+        let url = rpc.url();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(BACKFILL_BUDGET_SECS);
+        let mut fetched: Vec<VortexTransaction> = Vec::new();
+        for chunk in wanted.chunks(60) {
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+            let results = futures_util::future::join_all(chunk.chunks(5).map(|group| {
+                let url = url.clone();
+                async move {
+                    let mut out = Vec::new();
+                    for sig in group {
+                        if let Ok(Some(tx)) = vortex::geyser::rpc_frame::fetch_transaction(&url, sig).await {
+                            out.push(tx);
+                        }
+                    }
+                    out
+                }
+            }))
+            .await;
+            fetched.extend(results.into_iter().flatten());
+        }
+        fetched.sort_by_key(|t| t.received_at);
+        self.apply_history(program_id, fetched, started)
+    }
+
+    /// Feeds historical transactions into a program's windows, known errors and hourly rollups.
+    fn apply_history(&self, program_id: &str, txs: Vec<VortexTransaction>, now: i64) -> Result<BackfillReport> {
+        let (program, live_from) = {
+            let state = self.state.lock().unwrap();
+            let ps = state.programs.get(program_id).ok_or_else(|| anyhow::anyhow!("program not monitored"))?;
+            (ps.program.clone(), ps.window.first_second.unwrap_or(now))
+        };
+        let mut window = Window::default();
+        let mut fingerprints: HashMap<String, Fingerprint> = HashMap::new();
+        let mut first_seen: HashMap<String, i64> = HashMap::new();
+        let mut rollups: HashMap<i64, crate::rollup::Rollup> = HashMap::new();
+        let mut count = 0usize;
+        let mut earliest = now;
+        let mut latest = 0;
+        for tx in txs.iter().filter(|t| t.touches(program_id)) {
+            let second = tx.received_at.timestamp();
+            if second >= live_from || self.state.lock().unwrap().tx_index.contains_key(&tx.signature) {
+                continue;
+            }
+            let summary = summarize(tx, program_id, &self.prices, Some(&self.idls));
+            let fp = fingerprint_with(tx, Some(&self.idls));
+            if let Some(fp) = &fp {
+                fingerprints.entry(fp.key()).or_insert_with(|| fp.clone());
+                first_seen.entry(fp.key()).or_insert(second);
+            }
+            window.record(second, tx.success, summary.compute_units, tx.fee, tx.fee_payer(), fp.as_ref().map(Fingerprint::key));
+            let mut names = summary.instructions.clone();
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                names.push("(unnamed)".into());
+            }
+            window.record_instructions(second, &names, tx.success, summary.compute_units);
+            let hour = second - second.rem_euclid(3600);
+            let error = fp.as_ref().map(|f| (f.key(), describe_fingerprint(Some(f), &f.key(), &program_labels_one(&program))));
+            rollups.entry(hour).or_default().record(crate::rollup::Observation {
+                ok: tx.success,
+                fee: tx.fee,
+                compute_units: summary.compute_units,
+                signer: tx.fee_payer(),
+                instructions: &names,
+                error: error.as_ref().map(|(k, l)| (k.as_str(), l.as_str())),
+                usd: 0.0,
+                sol: 0.0,
+                big: None,
+            });
+            count += 1;
+            earliest = earliest.min(second);
+            latest = latest.max(second);
+        }
+        if count == 0 {
+            return Ok(BackfillReport { transactions: 0, seconds: 0 });
+        }
+        // Hours already summarised (by an earlier run) are left alone so nothing is counted twice.
+        for (hour, rollup) in rollups {
+            if self.store.rollup(program_id, hour)?.is_none() {
+                self.store.put_rollup(program_id, hour, &rollup)?;
+            }
+        }
+        use crate::metrics::{ANOMALY_ACTIVITY, ANOMALY_COMPUTE, ANOMALY_FAILURE};
+        let mut state = self.state.lock().unwrap();
+        let Some(ps) = state.programs.get_mut(program_id) else { return Ok(BackfillReport { transactions: 0, seconds: 0 }) };
+        ps.window.absorb_earlier(window, now, ANOMALY_FAILURE | ANOMALY_ACTIVITY | ANOMALY_COMPUTE);
+        for (k, v) in fingerprints {
+            ps.fingerprints.entry(k).or_insert(v);
+        }
+        // Errors seen in the history are not "new" when they show up again.
+        for (k, t) in first_seen {
+            let e = ps.fingerprint_first_seen.entry(k).or_insert(t);
+            *e = (*e).min(t);
+        }
+        Ok(BackfillReport { transactions: count, seconds: latest - earliest })
+    }
+
     /// A cached posture, if one has been read; never touches the network.
     fn cached_posture(&self, program_id: &str) -> Option<crate::posture::Posture> {
         self.postures.lock().unwrap().get(program_id).map(|(_, p)| p.clone())
@@ -2142,6 +2332,7 @@ impl Sentinel {
         };
         self.sync_filters();
         self.idls.request(&program.program_id);
+        let _ = self.backfill_queue.send(program.program_id.clone());
         Ok(program)
     }
 

@@ -170,6 +170,36 @@ impl Window {
         }
     }
 
+    /// Adds history from before anything in this window, so a program starts with a baseline
+    /// instead of learning one. Seconds between the history and the first live second (or `now`
+    /// when nothing live has arrived) are left empty and marked `gap_bits`, so baselines skip them.
+    pub fn absorb_earlier(&mut self, earlier: Window, now: i64, gap_bits: u8) {
+        let Some(last) = earlier.buckets.back().map(|b| b.second) else { return };
+        let mut merged = earlier.buckets;
+        let live_start = self.buckets.front().map(|b| b.second).unwrap_or(now + 1);
+        // Anything from the history that overlaps live data is dropped; live data wins.
+        while merged.back().is_some_and(|b| b.second >= live_start) {
+            merged.pop_back();
+        }
+        let last = merged.back().map(|b| b.second).unwrap_or(last.min(live_start - 1));
+        for second in last + 1..live_start {
+            merged.push_back(Bucket { second, anomalous: gap_bits, ..Default::default() });
+        }
+        merged.append(&mut self.buckets);
+        self.buckets = merged;
+        if let Some(newest) = self.buckets.back().map(|b| b.second) {
+            while self.buckets.front().is_some_and(|b| b.second <= newest - HISTORY_SECS) {
+                self.buckets.pop_front();
+            }
+        }
+        self.first_second = match (self.first_second, earlier.first_second) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.total_tx += earlier.total_tx;
+        self.total_failed += earlier.total_failed;
+    }
+
     /// Seconds of history available (for warmup checks).
     pub fn age(&self, now: i64) -> i64 {
         self.first_second.map(|f| now - f).unwrap_or(0)
