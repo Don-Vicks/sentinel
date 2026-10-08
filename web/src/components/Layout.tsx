@@ -1,3 +1,4 @@
+import { getCluster } from '../lib/format';
 import { useEffect, useState } from 'react';
 import { Link, NavLink, Outlet, useNavigate } from 'react-router';
 import { Bell, LayoutGrid, Search, Siren, Star } from 'lucide-react';
@@ -54,6 +55,11 @@ function StatusBar() {
         <span className={`size-2 rounded-full ${live ? 'bg-good' : 'bg-warn'} pulse-dot`} aria-hidden />
         {live ? 'Live' : stalled ? 'Feed stalled · detectors paused' : sse ? 'Waiting for data' : 'Reconnecting'}
       </span>
+      {getCluster() !== 'mainnet' && (
+        <span className="whitespace-nowrap rounded bg-warn-soft px-1.5 py-px font-medium text-warn" title="This instance watches a test network; explorer links follow it">
+          {getCluster()}
+        </span>
+      )}
       <span
         className={`hidden xl:inline whitespace-nowrap ${stream?.transport === 'mirage' ? 'text-warn' : 'text-ink-3'}`}
         title={stream?.transport === 'mirage' ? 'gRPC was unavailable, so the stream is running over Solami Mirage' : undefined}

@@ -164,6 +164,13 @@ pub fn diagnose(inc: &Incident, history: &[Incident]) -> Diagnosis {
             steps.push("Check whether your frontend, RPC provider or keeper is up; traffic does not usually stop on its own.".into());
             steps.push("Check Sentinel's own feed status before assuming the program is down.".into());
         }
+        IncidentKind::BotActivity => {
+            signals += 1;
+            likely_cause = Some("One wallet is sending most of the program's traffic.".into());
+            evidence.push(inc.summary.clone());
+            steps.push("Open the linked transactions: do they succeed, and what do they move? A keeper doing its job looks different from an exploit attempt or a runaway bot.".into());
+            steps.push("If it is your own keeper or a known partner, add a rule for the wallet and ignore this; if not, check whether it targets one instruction.".into());
+        }
         IncidentKind::ActivitySpike => {
             evidence.push(format!("{} transactions from {} wallets.", inc.affected_count, inc.affected_wallets));
             steps.push("Check wallet concentration in the linked transactions: a handful of wallets is a bot or an attack, many is real demand.".into());
@@ -227,7 +234,8 @@ fn span(secs: i64) -> String {
 }
 
 /// A post-mortem in markdown: what happened, when, why it likely happened and what to do.
-pub fn markdown(inc: &Incident, label: &str, txs: &[TxSummary], history: &[Incident], link: &str) -> String {
+/// `cluster_query` is appended to explorer links (`?cluster=devnet`), empty on mainnet.
+pub fn markdown(inc: &Incident, label: &str, txs: &[TxSummary], history: &[Incident], link: &str, cluster_query: &str) -> String {
     let d = diagnose(inc, history);
     let mut out = String::new();
     out.push_str(&format!("# {} (#{})\n\n", inc.title, inc.id));
@@ -330,9 +338,10 @@ pub fn markdown(inc: &Incident, label: &str, txs: &[TxSummary], history: &[Incid
         out.push_str("## Example transactions\n\n");
         for t in txs.iter().take(10) {
             out.push_str(&format!(
-                "- [`{}`](https://solscan.io/tx/{}){}\n",
+                "- [`{}`](https://solscan.io/tx/{}{}){}\n",
                 &t.signature[..t.signature.len().min(12)],
                 t.signature,
+                cluster_query,
                 t.error.as_deref().map(|e| format!(": {e}")).unwrap_or_default()
             ));
         }
@@ -417,7 +426,7 @@ mod tests {
         let mut inc = incident(11, "failure_spike", ev);
         inc.status = IncidentStatus::Resolved;
         inc.resolved_at = Some(inc.detected_at + chrono::Duration::minutes(12));
-        let md = markdown(&inc, "Pump.fun", &[], &[], "https://sentinel.example/incidents/11");
+        let md = markdown(&inc, "Pump.fun", &[], &[], "https://sentinel.example/incidents/11", "");
         for section in ["# Transaction failure spike", "## Timeline", "resolved (lasted 12m", "## Recent upgrade", "| TooLittleSolReceived |", "## Diagnosis", "## Next steps", "[Open in Sentinel]"] {
             assert!(md.contains(section), "missing {section:?} in:\n{md}");
         }

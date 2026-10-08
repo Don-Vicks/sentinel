@@ -152,7 +152,10 @@ fn incident_ref(i: &Incident) -> IncidentRef {
 
 /// Kinds that mean the program was unhealthy, as opposed to something happening to it.
 fn is_reliability(kind: IncidentKind) -> bool {
-    !matches!(kind, IncidentKind::AuthorityChange | IncidentKind::DependencyChange | IncidentKind::LargeTransfer)
+    !matches!(
+        kind,
+        IncidentKind::AuthorityChange | IncidentKind::DependencyChange | IncidentKind::LargeTransfer | IncidentKind::BotActivity
+    )
 }
 
 /// Total seconds covered by the union of `[start, end)` intervals.

@@ -10,7 +10,8 @@ export type IncidentKind =
   | 'error_spike'
   | 'authority_change'
   | 'vault_drain'
-  | 'dependency_change';
+  | 'dependency_change'
+  | 'bot_activity';
 export type Health = 'healthy' | 'degraded' | 'critical' | 'warming_up' | 'idle';
 
 export interface LargestTransfer {

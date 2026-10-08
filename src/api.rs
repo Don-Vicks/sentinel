@@ -148,6 +148,7 @@ async fn status(State(s): State<AppState>, Viewer(account): Viewer) -> ApiResult
         "programs": s.programs(),
         "series": s.programs_series(300),
         "now": Utc::now(),
+        "cluster": s.cluster,
     })))
 }
 

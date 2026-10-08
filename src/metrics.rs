@@ -15,7 +15,8 @@ pub struct Bucket {
     pub cu_n: u32,
     pub cu_max: u64,
     pub fees: u64,
-    pub signers: HashSet<String>,
+    /// Transactions per fee payer in this second.
+    pub signers: HashMap<String, u32>,
     pub fingerprints: HashMap<String, u32>,
     pub instructions: HashMap<String, InstructionAgg>,
     /// Bitmask of detectors that considered this second anomalous; such
@@ -143,9 +144,7 @@ impl Window {
         }
         bucket.fees += fee;
         if let Some(s) = signer {
-            if !bucket.signers.contains(s) {
-                bucket.signers.insert(s.to_string());
-            }
+            *bucket.signers.entry(s.to_string()).or_default() += 1;
         }
         if let Some(fp) = fingerprint {
             *bucket.fingerprints.entry(fp).or_default() += 1;
@@ -234,7 +233,7 @@ impl Window {
             s.cu_n += b.cu_n as u64;
             s.cu_max = s.cu_max.max(b.cu_max);
             s.fees += b.fees;
-            signers.extend(b.signers.iter().map(String::as_str));
+            signers.extend(b.signers.keys().map(String::as_str));
             for (k, v) in &b.fingerprints {
                 *s.fingerprints.entry(k.clone()).or_default() += *v as u64;
             }
@@ -248,6 +247,22 @@ impl Window {
         }
         s.unique_signers = signers.len();
         s
+    }
+
+    /// The busiest fee payer over `[now - from_ago, now - to_ago)`: how many transactions the
+    /// window held in all, and who sent the most of them.
+    pub fn top_signer(&self, now: i64, from_ago: i64, to_ago: i64) -> (u64, Option<(String, u64)>) {
+        let (start, end) = (now - from_ago, now - to_ago);
+        let mut counts: HashMap<&str, u64> = HashMap::new();
+        let mut total = 0u64;
+        for b in self.buckets.iter().filter(|b| b.second >= start && b.second < end) {
+            total += b.tx as u64;
+            for (k, v) in &b.signers {
+                *counts.entry(k.as_str()).or_default() += *v as u64;
+            }
+        }
+        let top = counts.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0))).map(|(k, v)| (k.to_string(), v));
+        (total, top)
     }
 
     /// Transaction counts per `chunk`-second slice over `[now - from_ago, now - to_ago)`.

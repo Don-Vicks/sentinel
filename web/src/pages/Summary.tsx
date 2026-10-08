@@ -5,7 +5,7 @@ import { send, useFetch } from '../lib/api';
 import { usePrograms } from '../lib/programs';
 import type { Summary, SummaryActivity, SummarySchedule } from '../lib/types';
 import { ago, compact, duration, explorer, KIND_LABEL, num, pct, short, usd } from '../lib/format';
-import { HourlyBars, ShareBar } from '../components/charts';
+import { HourlyBars, ShareBar, Sparkline } from '../components/charts';
 import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, Spinner, Stat } from '../components/ui';
 import { HealthCard } from '../components/HealthCard';
 import { RequireAccount } from '../components/SignIn';
@@ -197,6 +197,14 @@ export function ProgramSummary() {
                       {data.busiest_hour ? `Busiest hour ${new Date(data.busiest_hour.hour * 1000).toISOString().slice(11, 16)} UTC with ${num(data.busiest_hour.tx)} transactions. ` : ''}
                       Red is failed. Sentinel saw traffic in {Math.round(data.coverage * 100)}% of the hours in this period.
                     </p>
+                    {data.hourly.filter((h) => h.health_avg !== null).length >= 3 && (
+                      <div className="mt-3">
+                        <Sparkline values={data.hourly.map((h) => h.health_avg)} height={36} />
+                        <p className="text-xs text-ink-3 mt-1">
+                          Health score by hour, lowest {Math.min(...data.hourly.map((h) => h.health_min ?? 100))}/100. It is sampled about once a minute.
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </Panel>
                 <HealthCard programId={id} />

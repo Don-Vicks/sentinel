@@ -76,6 +76,13 @@ pub struct DetectionConfig {
     /// Upgrades, upgrade-authority changes and closure of the program itself.
     pub authority_enabled: bool,
 
+    /// One wallet suddenly sending most of a program's traffic.
+    pub concentration_enabled: bool,
+    /// Percent of the last minute's transactions one wallet must account for...
+    pub concentration_share_pct: f64,
+    /// ...out of at least this many transactions.
+    pub concentration_min_tx: u32,
+
     /// Vault and treasury accounts (token accounts, or SOL accounts) to watch for drains.
     pub vaults: Vec<String>,
     pub drain_enabled: bool,
@@ -137,6 +144,9 @@ impl Default for DetectionConfig {
             ],
             transfer_usd_threshold: Some(250_000.0),
             authority_enabled: true,
+            concentration_enabled: true,
+            concentration_share_pct: 60.0,
+            concentration_min_tx: 100,
             vaults: Vec::new(),
             drain_enabled: true,
             drain_window_secs: 600,
@@ -163,6 +173,8 @@ pub enum IncidentKind {
     VaultDrain,
     /// A program this one calls was upgraded or changed hands.
     DependencyChange,
+    /// One wallet is sending most of the program's traffic, unlike before.
+    BotActivity,
 }
 
 impl IncidentKind {
@@ -178,6 +190,7 @@ impl IncidentKind {
             Self::AuthorityChange => "authority_change",
             Self::VaultDrain => "vault_drain",
             Self::DependencyChange => "dependency_change",
+            Self::BotActivity => "bot_activity",
         }
     }
 
@@ -197,6 +210,7 @@ impl IncidentKind {
             Self::AuthorityChange => "Program upgrade or authority change",
             Self::VaultDrain => "Vault outflow",
             Self::DependencyChange => "Dependency changed",
+            Self::BotActivity => "Traffic concentrated in one wallet",
         }
     }
 }

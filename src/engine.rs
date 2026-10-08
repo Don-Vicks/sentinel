@@ -67,6 +67,9 @@ pub struct Sentinel {
     pub limits: crate::limits::Limits,
     pub live: broadcast::Sender<Arc<LiveEvent>>,
     pub public_url: String,
+    /// Which cluster this instance watches: mainnet (default), devnet or testnet. It sets the
+    /// explorer links; the endpoints you configure decide what is actually streamed.
+    pub cluster: &'static str,
     dispatcher: Dispatcher,
     writer: Writer,
     state: Mutex<State>,
@@ -199,6 +202,8 @@ enum LinkFilter {
     Fingerprint(String),
     /// Linked explicitly by whoever raised the incident.
     Manual,
+    /// Transactions paid for by one wallet.
+    Signer(String),
 }
 
 impl LinkFilter {
@@ -209,6 +214,7 @@ impl LinkFilter {
             LinkFilter::All => true,
             LinkFilter::Fingerprint(fp) => summary.fingerprint.as_deref() == Some(fp.as_str()),
             LinkFilter::Manual => false,
+            LinkFilter::Signer(w) => summary.fee_payer.as_deref() == Some(w.as_str()),
         }
     }
 }
@@ -321,6 +327,11 @@ impl Sentinel {
             prices,
             live,
             public_url,
+            cluster: match std::env::var("SENTINEL_CLUSTER").unwrap_or_default().to_lowercase().as_str() {
+                "devnet" => "devnet",
+                "testnet" => "testnet",
+                _ => "mainnet",
+            },
             dispatcher,
             writer: Writer::spawn(store_for_writer),
             state: Mutex::new(state),
@@ -754,6 +765,17 @@ impl Sentinel {
                         self.on_detection(ps, &key, d, None, now);
                     }
                     None => self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64),
+                }
+            }
+
+            // One wallet suddenly sending most of the traffic.
+            if now % 5 == 0 {
+                const KEY: &str = "bot_activity";
+                match detect::concentration(&ps.window, &cfg, now) {
+                    Some((d, wallet)) => {
+                        self.on_detection(ps, KEY, d, Some(LinkFilter::Signer(wallet)), now);
+                    }
+                    None => self.on_quiet(ps, KEY, now, cfg.resolve_after_secs as i64),
                 }
             }
 
@@ -2434,7 +2456,8 @@ impl Sentinel {
         let Some((incident, history)) = self.incident_with_history(id)? else { return Ok(None) };
         let label = self.program_labels().get(&incident.program_id).cloned().unwrap_or_else(|| short_sig(&incident.program_id));
         let txs = self.store.incident_transactions(id, 10)?;
-        Ok(Some(crate::report::markdown(&incident, &label, &txs, &history, &self.incident_link(id))))
+        let cluster = if self.cluster == "mainnet" { String::new() } else { format!("?cluster={}", self.cluster) };
+        Ok(Some(crate::report::markdown(&incident, &label, &txs, &history, &self.incident_link(id), &cluster)))
     }
 
     /// Loads the last few minutes of the program's transactions over RPC, so the detectors
