@@ -267,6 +267,8 @@ export type Condition =
   | { type: 'transfer_usd'; min_usd: number }
   | { type: 'incident'; kinds: IncidentKind[]; min_severity: Severity }
   | { type: 'system'; kinds: ('feed_stalled' | 'rpc_failing')[] }
+  | { type: 'health'; below: number }
+  | { type: 'wallet_balance'; account: string; below_sol: number }
   | {
       type: 'instruction';
       name: string;
@@ -554,6 +556,8 @@ export interface HourPoint {
   tx: number;
   failed: number;
   usd_volume: number;
+  health_avg: number | null;
+  health_min: number | null;
 }
 
 export interface Summary {

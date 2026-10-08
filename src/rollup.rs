@@ -130,6 +130,10 @@ pub struct Rollup {
     pub vault_net_usd: f64,
     pub peak_tps: f64,
     pub peak_at: i64,
+    /// Health score samples taken during the hour (about one a minute).
+    pub health_sum: u64,
+    pub health_n: u32,
+    pub health_min: Option<u8>,
     pub signers: Hll,
     pub instructions: HashMap<String, IxCount>,
     pub errors: HashMap<String, ErrCount>,
@@ -199,7 +203,19 @@ impl Rollup {
         }
     }
 
+    pub fn note_health(&mut self, score: u8) {
+        self.health_sum += score as u64;
+        self.health_n += 1;
+        self.health_min = Some(self.health_min.map_or(score, |m| m.min(score)));
+    }
+
     pub fn merge(&mut self, other: &Rollup) {
+        self.health_sum += other.health_sum;
+        self.health_n += other.health_n;
+        self.health_min = match (self.health_min, other.health_min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         self.tx += other.tx;
         self.failed += other.failed;
         self.fees += other.fees;

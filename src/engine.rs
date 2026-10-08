@@ -588,6 +588,15 @@ impl Sentinel {
                 if matches!(rule.condition, Condition::Instruction { .. }) {
                     alerts.extend(self.instruction_rule(ps, rule, &tx, &summary, second));
                 }
+                if let Condition::WalletBalance { account, below_sol } = &rule.condition {
+                    if let Some(a) = tx.accounts.iter().find(|a| &a.pubkey == account) {
+                        let balance = a.post_lamports as f64 / 1e9;
+                        if balance < *below_sol {
+                            let msg = format!("Wallet {} holds {:.4} SOL after {}, below the {} SOL you set", short_sig(account), balance, short_sig(&tx.signature), below_sol);
+                            alerts.extend(self.fire_rule(ps, rule, msg, balance, LinkFilter::Manual, true, second, Some((&tx, &summary))));
+                        }
+                    }
+                }
                 if let Condition::TransferUsd { min_usd } = &rule.condition {
                     let best = tx
                         .transfers
@@ -662,6 +671,7 @@ impl Sentinel {
         }
         state.stalled = stalled;
         let paused = now < state.hold_until;
+        let stalled_now = state.stalled;
 
         // The stream follows the programs these ones call, so their upgrades are seen too.
         let mut resync_filters = false;
@@ -841,6 +851,46 @@ impl Sentinel {
                         }
                     } else {
                         self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64);
+                    }
+                }
+            }
+
+            // The health score: sampled each minute for the summary, and judged every 15 seconds
+            // for rules that want to know when it drops.
+            if now % 15 == 0 {
+                let wants_health = applicable.iter().any(|r| matches!(r.condition, Condition::Health { .. }));
+                if wants_health || now % 60 == 0 {
+                    let health = self.health_of(ps, stalled_now, now);
+                    if let Some(score) = health.score {
+                        if now % 60 == 0 {
+                            if let Some((_, rollup)) = ps.rollup.as_mut() {
+                                rollup.note_health(score);
+                            }
+                        }
+                        for rule in &applicable {
+                            let Condition::Health { below } = &rule.condition else { continue };
+                            let hit = score < *below;
+                            let was = ps.rule_firing.insert(rule.id, hit).unwrap_or(false);
+                            let key = format!("rule:{}", rule.id);
+                            if hit && !was {
+                                let worst = health
+                                    .checks
+                                    .iter()
+                                    .filter(|c| c.score.is_some())
+                                    .min_by_key(|c| c.score.unwrap_or(100))
+                                    .map(|c| format!(". Weakest check, {}: {}", c.label, c.detail))
+                                    .unwrap_or_default();
+                                let msg = format!("Health score {score} (below {below}){worst}");
+                                alerts.extend(self.fire_rule(ps, rule, msg, score as f64, LinkFilter::All, false, now, None));
+                            } else if hit {
+                                if let Some(open) = ps.open.get_mut(&key) {
+                                    open.quiet_since = None;
+                                    open.incident.observed = Some(score as f64);
+                                }
+                            } else {
+                                self.on_quiet(ps, &key, now, cfg.resolve_after_secs as i64);
+                            }
+                        }
                     }
                 }
             }
@@ -1759,7 +1809,11 @@ impl Sentinel {
                 Condition::Metric { value, window_secs, .. } => (Some(*value), *window_secs as i64),
                 Condition::Transfer { min_amount, .. } => (Some(*min_amount), 60),
                 Condition::TransferUsd { min_usd } => (Some(*min_usd), 60),
-                Condition::Incident { .. } | Condition::Instruction { .. } | Condition::System { .. } => (None, 60),
+                Condition::Incident { .. }
+                | Condition::Instruction { .. }
+                | Condition::System { .. }
+                | Condition::Health { .. }
+                | Condition::WalletBalance { .. } => (None, 60),
             };
             let incident = Incident {
                 id: 0,
@@ -2461,23 +2515,27 @@ impl Sentinel {
 
     /// How healthy a program is right now, check by check.
     pub fn health(&self, program_id: &str) -> Option<crate::health::Health> {
-        let posture = self.cached_posture(program_id);
-        let idl_loaded = self.idls.cached(program_id).is_some();
         let state = self.state.lock().unwrap();
         let ps = state.programs.get(program_id)?;
-        let now = Utc::now().timestamp();
+        Some(self.health_of(ps, state.stalled, Utc::now().timestamp()))
+    }
+
+    fn health_of(&self, ps: &ProgramState, feed_stalled: bool, now: i64) -> crate::health::Health {
+        let program_id = ps.program.program_id.as_str();
+        let posture = self.cached_posture(program_id);
+        let idl_loaded = self.idls.cached(program_id).is_some();
         let snapshot = snapshot(ps, now);
         let open: Vec<Incident> = ps.open.values().map(|o| o.incident.clone()).collect();
-        Some(crate::health::evaluate(&crate::health::Inputs {
+        crate::health::evaluate(&crate::health::Inputs {
             snapshot: &snapshot,
             open: &open,
-            feed_stalled: state.stalled,
+            feed_stalled,
             idl_loaded,
             posture: posture.as_ref(),
             vaults_watched: ps.program.detection.vaults.len(),
             dependencies: ps.deps.values().filter(|d| d.calls >= MIN_DEP_CALLS).count(),
             now,
-        }))
+        })
     }
 
     /// What a program did over the last `period_secs`, from the stored hourly rollups.

@@ -86,6 +86,9 @@ pub struct HourPoint {
     pub tx: u64,
     pub failed: u64,
     pub usd_volume: f64,
+    /// Average and lowest health score sampled in the hour.
+    pub health_avg: Option<f64>,
+    pub health_min: Option<u8>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,7 +289,14 @@ pub fn build(store: &Store, program_id: &str, label: &str, now: i64, period_secs
     };
     let hourly: Vec<HourPoint> = rows
         .iter()
-        .map(|(h, r)| HourPoint { hour: *h, tx: r.tx, failed: r.failed, usd_volume: r.usd_volume })
+        .map(|(h, r)| HourPoint {
+            hour: *h,
+            tx: r.tx,
+            failed: r.failed,
+            usd_volume: r.usd_volume,
+            health_avg: (r.health_n > 0).then(|| r.health_sum as f64 / r.health_n as f64),
+            health_min: r.health_min,
+        })
         .collect();
     let busiest_hour = hourly.iter().filter(|h| h.tx > 0).max_by_key(|h| h.tx).cloned();
 

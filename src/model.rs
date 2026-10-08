@@ -520,6 +520,11 @@ pub enum Condition {
         kinds: Vec<IncidentKind>,
         min_severity: Severity,
     },
+    /// The program's health score (0-100) drops below `below`.
+    Health { below: u8 },
+    /// A wallet that appears in the program's transactions (a keeper, a fee payer) holds less
+    /// SOL than it should.
+    WalletBalance { account: String, below_sol: f64 },
     /// Sentinel itself can't see the chain: its stream stalled, or RPC keeps failing.
     System {
         /// Empty = any.

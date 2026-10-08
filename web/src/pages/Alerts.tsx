@@ -12,7 +12,7 @@ import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../comp
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
-type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'system';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'system' | 'health' | 'wallet';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
@@ -24,6 +24,8 @@ const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: numb
   { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000 },
   { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
   { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0 },
+  { id: 'health', label: 'The program\'s health score drops below', unit: '/ 100', defaultValue: 70 },
+  { id: 'wallet', label: 'A wallet\'s SOL balance drops below', unit: 'SOL', defaultValue: 1 },
   { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0 },
 ];
 
@@ -78,6 +80,10 @@ function describe(c: Condition) {
       return `transfer ≥ ${c.min_amount.toLocaleString()} ${MINTS.find((m) => m.value === (c.mint ?? ''))?.label ?? short(c.mint)}`;
     case 'incident':
       return `incident opens (severity ≥ ${c.min_severity}${c.kinds.length ? `, ${c.kinds.join('/')}` : ''})`;
+    case 'health':
+      return `health score below ${c.below} / 100`;
+    case 'wallet_balance':
+      return `${short(c.account)} holds less than ${c.below_sol} SOL`;
     case 'system':
       return `Sentinel itself is blind (${c.kinds.length ? c.kinds.join(' / ').replace(/_/g, ' ') : 'feed stalled or RPC failing'}), and when it recovers`;
     case 'instruction': {
@@ -112,6 +118,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [severity, setSeverity] = useState<Severity>('high');
   const [createIncident, setCreateIncident] = useState(true);
   const [channels, setChannels] = useState<ChannelDraft[]>([]);
+  const [walletAccount, setWalletAccount] = useState('');
   const [ixName, setIxName] = useState('');
   const [ixFilters, setIxFilters] = useState<FilterDraft[]>([]);
   const [ixMode, setIxMode] = useState<'all' | 'any'>('all');
@@ -145,6 +152,8 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     if (template === 'transfer_usd') return { type: 'transfer_usd', min_usd: v };
     if (template === 'incident') return { type: 'incident', kinds: [], min_severity: minSeverity };
     if (template === 'system') return { type: 'system', kinds: [] };
+    if (template === 'health') return { type: 'health', below: Math.min(100, Math.max(1, Math.round(v))) };
+    if (template === 'wallet') return { type: 'wallet_balance', account: walletAccount.trim(), below_sol: v };
     if (template === 'instruction') {
       return {
         type: 'instruction',
@@ -163,6 +172,10 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     setError(null);
     if (template === 'instruction' && !ixName.trim() && !ixFirstSeen && !ixFilters.some((f) => f.path.trim() && f.value.trim())) {
       setError('Name an instruction, add a condition, or choose first-time signers; otherwise this would fire on every call.');
+      return;
+    }
+    if (template === 'wallet' && !walletAccount.trim()) {
+      setError('Enter the wallet address to watch.');
       return;
     }
     if (template !== 'incident' && template !== 'instruction' && template !== 'system' && !(Number(value) > 0)) {
@@ -244,6 +257,12 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             {TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
           </select>
         </div>
+        {template === 'wallet' && (
+          <div className="md:col-span-3">
+            <label className="label" htmlFor="rule-wallet">Wallet address (a keeper or fee payer that appears in this program's transactions)</label>
+            <input id="rule-wallet" className="input font-mono" value={walletAccount} onChange={(e) => setWalletAccount(e.target.value)} placeholder="Wallet address" autoComplete="off" />
+          </div>
+        )}
         {template === 'system' ? (
           <p className="md:col-span-2 text-xs text-ink-3">
             Fires when the chain tip stops advancing on Sentinel's stream (detectors pause, so a quiet program isn't reported as down) or when RPC calls keep failing, and again when it recovers.
