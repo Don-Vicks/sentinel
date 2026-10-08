@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Link } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { BellRing, CheckCircle2, Send, Trash2, XCircle } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
@@ -8,7 +8,7 @@ import { useAuth } from '../lib/auth';
 import { RequireAccount } from '../components/SignIn';
 import type { AlertExecution, AlertRule, ArgFilter, Condition, FilterOp, InstructionSchema, Metric, Severity } from '../lib/types';
 import { ago, clock, short } from '../lib/format';
-import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner } from '../components/ui';
+import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs } from '../components/ui';
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
@@ -433,6 +433,10 @@ function AlertsBody() {
   const executions = useFetch<AlertExecution[]>('/api/alerts');
   const { programs } = usePrograms();
   const [testing, setTesting] = useState<number | null>(null);
+  const [params, setParams] = useSearchParams();
+  const tab = (['rules', 'deliveries', 'agents'] as const).find((t) => t === params.get('tab')) ?? 'rules';
+  const setTab = (t: 'rules' | 'deliveries' | 'agents') => setParams(t === 'rules' ? {} : { tab: t }, { replace: true });
+  const failed = (executions.data ?? []).filter((x) => !x.delivered).length;
   const label = (id: string | null) => (id ? programs.find((p) => p.program_id === id)?.label ?? short(id) : 'All programs');
 
   useLive((e) => {
@@ -463,7 +467,19 @@ function AlertsBody() {
 
   return (
     <div className="space-y-6">
+      <Tabs
+        label="Alert sections"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { value: 'rules', label: 'Rules' },
+          { value: 'deliveries', label: 'Deliveries', badge: failed || undefined, tone: 'crit' },
+          { value: 'agents', label: 'Agent access' },
+        ]}
+      />
 
+      {tab === 'rules' && (
+      <div className="space-y-6">
       <Panel title="New rule">
         <RuleForm onCreated={rules.reload} />
       </Panel>
@@ -520,8 +536,12 @@ function AlertsBody() {
         )}
       </Panel>
 
-      <AgentAccess />
+      </div>
+      )}
 
+      {tab === 'agents' && <AgentAccess />}
+
+      {tab === 'deliveries' && (
       <Panel title="Deliveries">
         {executions.loading && !executions.data ? (
           <div className="p-4"><Skeleton className="h-16" /></div>
@@ -560,6 +580,7 @@ function AlertsBody() {
           </div>
         )}
       </Panel>
+      )}
     </div>
   );
 }
