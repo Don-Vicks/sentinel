@@ -92,8 +92,13 @@ fn discriminator(name: &str) -> Vec<u8> {
     solana_sdk::hash::hashv(&[b"global:", name.as_bytes()]).to_bytes()[..8].to_vec()
 }
 
-/// A Squads `vault_transaction_execute` whose vault then upgrades the program through the loader.
 fn squads_upgrade(signature: &str, second: i64) -> Arc<VortexTransaction> {
+    governed_upgrade(signature, second, SQUADS, discriminator("vault_transaction_execute"))
+}
+
+/// A governance call (Squads `vault_transaction_execute`, Realms `ExecuteTransaction`) whose vault
+/// then upgrades the program through the loader.
+fn governed_upgrade(signature: &str, second: i64, governance: &str, data: Vec<u8>) -> Arc<VortexTransaction> {
     let pd = programdata_address(PROGRAM).unwrap();
     let mut tx = (*traffic(0, second, true)).clone();
     tx.signature = signature.into();
@@ -116,7 +121,7 @@ fn squads_upgrade(signature: &str, second: i64) -> Arc<VortexTransaction> {
         parsed: None,
     };
     tx.instructions = vec![
-        ix("0", SQUADS, vec![MULTISIG, "Proposal111111111111111111111111111111111", "Transaction11111111111111111111111111111111", MEMBER], discriminator("vault_transaction_execute"), None),
+        ix("0", governance, vec![MULTISIG, "Proposal111111111111111111111111111111111", "Transaction11111111111111111111111111111111", MEMBER], data, None),
         // The loader's Upgrade: [programdata, program, buffer, spill, rent, clock, authority].
         ix("0.0", LOADER, vec![&pd, PROGRAM, "Buffer11111111111111111111111111111111111", "Spill111111111111111111111111111111111111", "SysvarRent111111111111111111111111111111111", "SysvarC1ock11111111111111111111111111111111", VAULT], 3u32.to_le_bytes().to_vec(), Some(0)),
     ];
@@ -216,5 +221,31 @@ async fn an_upgrade_a_squads_multisig_executed_names_it_and_what_it_requires() {
     }))
     .unwrap();
     assert!(direct.evidence["authority"]["via"].is_null());
+    let _ = std::fs::remove_file(&dir);
+}
+
+#[tokio::test]
+async fn an_upgrade_a_realms_dao_executed_is_named() {
+    let dir = std::env::temp_dir().join(format!("sentinel-realms-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&dir);
+    let store = Arc::new(Store::open(dir.to_str().unwrap()).unwrap());
+    let (bus, _) = broadcast::channel(16);
+    let s = Sentinel::new(store.clone(), Arc::new(FakeSource(bus)), None, sentinel::pricing::PriceBook::new(), "http://ui".into()).unwrap();
+    s.add_program(PROGRAM.into(), None).unwrap();
+    // ExecuteTransaction is spl-governance instruction 14.
+    s.on_transaction(governed_upgrade("realmsUpgradeSig", 1_700_000_000, sentinel::squads::REALMS, vec![14]));
+    s.on_tick(1_700_000_001);
+    let incident = store
+        .incidents(Some(PROGRAM), 5)
+        .unwrap()
+        .into_iter()
+        .find(|i| i.kind == IncidentKind::AuthorityChange)
+        .expect("upgrade incident");
+    let a = &incident.evidence["authority"];
+    assert_eq!(a["via"]["program"], "Realms");
+    assert_eq!(a["via"]["instruction"], "execute_transaction");
+    assert_eq!(a["via"]["multisig"], MULTISIG, "for Realms this is the governance account");
+    assert!(incident.summary.contains("Realms governance "), "{}", incident.summary);
+    assert!(!incident.summary.contains("via CPI"), "{}", incident.summary);
     let _ = std::fs::remove_file(&dir);
 }

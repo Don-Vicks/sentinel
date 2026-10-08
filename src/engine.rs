@@ -53,8 +53,8 @@ pub struct Sentinel {
     backfill_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<String>>>,
     backfilled: Mutex<HashSet<String>>,
     /// Multisigs whose settings should be read for an incident, (incident id, multisig address).
-    enrich_queue: tokio::sync::mpsc::UnboundedSender<(i64, String)>,
-    enrich_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(i64, String)>>>,
+    enrich_queue: tokio::sync::mpsc::UnboundedSender<(i64, String, Vec<String>)>,
+    enrich_inbox: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(i64, String, Vec<String>)>>>,
     /// Transactions fetched over RPC, so reopening one doesn't hit the network again.
     rpc_txs: Mutex<HashMap<String, Arc<VortexTransaction>>>,
     /// Who can upgrade each program, read from chain and kept for a few minutes.
@@ -149,19 +149,6 @@ struct ProgramState {
     vaults: HashMap<String, VaultState>,
     /// Programs this one calls (CPI), from the call trees of its transactions.
     deps: HashMap<String, DepStat>,
-    /// The latest decoded program events, newest first.
-    events: VecDeque<EventRecord>,
-}
-
-const RECENT_EVENTS: usize = 200;
-
-/// A decoded program event, as shown on the dashboard.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct EventRecord {
-    pub at: DateTime<Utc>,
-    pub signature: String,
-    pub name: String,
-    pub fields: serde_json::Value,
 }
 
 #[derive(Default, Clone)]
@@ -257,7 +244,6 @@ impl ProgramState {
             window: Window::default(),
             recent: VecDeque::new(),
             recent_full: VecDeque::new(),
-            events: VecDeque::new(),
             fingerprints: HashMap::new(),
             fingerprint_first_seen: HashMap::new(),
             open: HashMap::new(),
@@ -314,6 +300,13 @@ impl Sentinel {
             ps.watchers.insert(SYSTEM.to_string());
         }
         let idls = IdlRegistry::new(rpc.clone());
+        // IDLs people supplied win over the chain's, and survive a restart.
+        for (program, json, _) in store.custom_idls().unwrap_or_default() {
+            match serde_json::from_str(&json).map_err(anyhow::Error::from).and_then(|v: serde_json::Value| crate::idl::Idl::parse(&program, &v)) {
+                Ok(idl) => idls.insert_custom(idl),
+                Err(e) => tracing::warn!(%program, error = %e, "a stored IDL no longer parses"),
+            }
+        }
         let (backfill_queue, backfill_inbox) = tokio::sync::mpsc::unbounded_channel();
         let (enrich_queue, enrich_inbox) = tokio::sync::mpsc::unbounded_channel();
         let auth = crate::auth::Auth::new(store.clone(), &public_url);
@@ -390,8 +383,13 @@ impl Sentinel {
             if let Some(mut inbox) = self.enrich_inbox.lock().unwrap().take() {
                 let this = self.clone();
                 tokio::spawn(async move {
-                    while let Some((incident, multisig)) = inbox.recv().await {
-                        if let Err(e) = this.enrich_multisig(incident, &multisig).await {
+                    while let Some((incident, multisig, proposals)) = inbox.recv().await {
+                        let result = if proposals.is_empty() {
+                            this.enrich_multisig(incident, &multisig).await
+                        } else {
+                            this.enrich_proposal(incident, &multisig, &proposals).await
+                        };
+                        if let Err(e) = result {
                             tracing::debug!(incident, %multisig, error = %e, "could not read the multisig");
                         }
                     }
@@ -458,6 +456,20 @@ impl Sentinel {
         // and the code accounts of the programs these ones depend on.
         let data: Vec<String> = ids.iter().chain(deps.iter()).filter_map(|p| crate::posture::programdata_address(p)).collect();
         ids.extend(data);
+        // Multisigs that rules watch.
+        let multisigs: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            state
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .filter_map(|r| match &r.condition {
+                    Condition::Squads { multisig, .. } => Some(multisig.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        ids.extend(multisigs);
         self.source.watch_programs(ids);
     }
 
@@ -501,6 +513,16 @@ impl Sentinel {
                     for event in crate::posture::detect(&tx, &dep, &code) {
                         let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
                         self.dependency_incident(ps, &tx, &summary, event, second);
+                    }
+                }
+            }
+            // A multisig this program's rules watch: its actions are not traffic to the program.
+            let watching: Vec<&AlertRule> = rules.iter().filter(|r| applies(r, &pid, &ps.watchers)).collect();
+            for rule in watching {
+                if let Condition::Squads { multisig, .. } = &rule.condition {
+                    if tx.touches(multisig) {
+                        let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+                        alerts.extend(self.squads_rule(ps, rule, &tx, &summary, second));
                     }
                 }
             }
@@ -1448,6 +1470,55 @@ impl Sentinel {
         None
     }
 
+    /// Matches a Squads rule against the actions the transaction made on its multisig.
+    fn squads_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        let Condition::Squads { multisig, actions, vault_index, success_only } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        for action in crate::squads::actions(tx, multisig) {
+            let name = action.instruction.unwrap_or_default();
+            if !actions.trim().is_empty() && (name.is_empty() || !crate::instruction_rule::name_matches(actions, name)) {
+                continue;
+            }
+            let mut vault = String::new();
+            if let Some(index) = vault_index {
+                let Some(address) = crate::squads::vault_address(&action.program_id, multisig, *index) else { continue };
+                if !tx.touches(&address) {
+                    continue;
+                }
+                vault = format!(", vault {index}");
+            }
+            let msg = format!(
+                "{} {} on {}{}{} in {}",
+                action.program,
+                if name.is_empty() { "action".to_string() } else { name.to_string() },
+                short_sig(multisig),
+                vault,
+                action.member.as_deref().map(|m| format!(" by {}", short_sig(m))).unwrap_or_default(),
+                short_sig(&tx.signature)
+            );
+            let alert = self.fire_rule(ps, rule, msg, 1.0, LinkFilter::Manual, true, second, Some((tx, summary)));
+            // Say where the proposal stands: how many have approved, out of how many.
+            if action.about_proposal() {
+                if let Some(open) = ps.open.get(&format!("rule:{}", rule.id)) {
+                    let _ = self.enrich_queue.send((open.incident.id, multisig.clone(), action.proposal_candidates.clone()));
+                }
+            }
+            return alert;
+        }
+        None
+    }
+
     /// Keeps the program's latest decoded events for the dashboard.
     fn note_events(&self, ps: &mut ProgramState, tx: &VortexTransaction) {
         if !tx.success || !crate::events::may_carry(tx) {
@@ -1455,9 +1526,8 @@ impl Sentinel {
         }
         let Some(idl) = self.idls.cached(&ps.program.program_id) else { return };
         for ev in crate::events::emitted(tx, &ps.program.program_id, &idl) {
-            ps.events.push_front(EventRecord { at: tx.received_at, signature: tx.signature.clone(), name: ev.name, fields: ev.fields });
+            self.writer.event(&ps.program.program_id, crate::events::EventRecord { at: tx.received_at, signature: tx.signature.clone(), name: ev.name, fields: ev.fields });
         }
-        ps.events.truncate(RECENT_EVENTS);
     }
 
     /// Adds one transaction to the hour's rollup, starting a new hour when needed.
@@ -1682,9 +1752,8 @@ impl Sentinel {
 
     /// The programs this one calls, busiest first, with how often and whether they are watched.
     /// The program's latest decoded events, newest first.
-    pub fn recent_events(&self, program_id: &str, limit: usize) -> Vec<EventRecord> {
-        let state = self.state.lock().unwrap();
-        state.programs.get(program_id).map(|ps| ps.events.iter().take(limit).cloned().collect()).unwrap_or_default()
+    pub fn recent_events(&self, program_id: &str, name: Option<&str>, limit: usize) -> Vec<crate::events::EventRecord> {
+        self.store.events(program_id, name, limit).unwrap_or_default()
     }
 
     pub fn dependencies(&self, program_id: &str) -> Option<serde_json::Value> {
@@ -1757,7 +1826,7 @@ impl Sentinel {
                 link_tx(&self.writer, open, tx, summary, second);
                 open.dirty = true;
                 if let Some(via) = &event.via {
-                    let _ = self.enrich_queue.send((open.incident.id, via.multisig.clone()));
+                    let _ = self.enrich_queue.send((open.incident.id, via.multisig.clone(), Vec::new()));
                 }
             }
         }
@@ -1837,6 +1906,46 @@ impl Sentinel {
         }
         self.store.upsert_program(&ps.program)?;
         Ok(ps.program.clone())
+    }
+
+    /// Adds where a Squads proposal stands ("2 of 3 approved") to the incident a vote or execution
+    /// opened. `candidates` are the accounts that may be the proposal; the one that reads as a
+    /// proposal of `multisig` is used. Run again on the next vote, it replaces the earlier reading.
+    pub async fn enrich_proposal(&self, incident_id: i64, multisig: &str, candidates: &[String]) -> Result<()> {
+        let Some(rpc) = &self.rpc else { return Ok(()) };
+        let mut found = None;
+        for address in candidates {
+            if let Ok(Some((info, requires))) = crate::squads::fetch_proposal(rpc, address, multisig).await {
+                found = Some((address.clone(), info, requires));
+                break;
+            }
+        }
+        let Some((address, info, requires)) = found else { return Ok(()) };
+        let threshold = requires.as_ref().map(|m| m.threshold);
+        let said = info.describe(threshold);
+        let apply = |inc: &mut Incident| {
+            // The summary without any earlier reading, so a later vote replaces it.
+            let base = inc.evidence["proposal"]["base_summary"].as_str().map(String::from).unwrap_or_else(|| inc.summary.clone());
+            inc.evidence["proposal"] = json!({ "address": address, "state": info, "requires": requires, "said": said, "base_summary": base });
+            inc.summary = format!("{base} (proposal {}: {said})", info.transaction_index);
+            inc.updated_at = Utc::now();
+        };
+        {
+            let mut state = self.state.lock().unwrap();
+            for ps in state.programs.values_mut() {
+                if let Some(open) = ps.open.values_mut().find(|o| o.incident.id == incident_id) {
+                    apply(&mut open.incident);
+                    open.dirty = true;
+                    return Ok(());
+                }
+            }
+        }
+        if let Some(mut inc) = self.store.incident(incident_id)? {
+            apply(&mut inc);
+            self.store.update_incident(&inc)?;
+            self.emit(LiveEvent::Incident { change: IncidentChange::Updated, incident: Box::new(inc) });
+        }
+        Ok(())
     }
 
     /// Adds what a multisig requires (3 of 5 signatures) to the incident its execution opened.
@@ -1988,6 +2097,7 @@ impl Sentinel {
                 Condition::Incident { .. }
                 | Condition::Instruction { .. }
                 | Condition::Event { .. }
+                | Condition::Squads { .. }
                 | Condition::System { .. }
                 | Condition::Health { .. }
                 | Condition::WalletBalance { .. } => (None, 60),
@@ -2188,6 +2298,23 @@ impl Sentinel {
         self.writer.flush();
     }
 
+    /// Uses an IDL a person supplied for a program (kept in the database across restarts).
+    /// Returns what it declares. Only the IDL JSON as `anchor idl` writes it is accepted.
+    pub fn set_custom_idl(&self, program_id: &str, owner: &str, json: &serde_json::Value) -> Result<serde_json::Value> {
+        let idl = crate::idl::Idl::parse(program_id, json).map_err(|e| anyhow::anyhow!("That is not an Anchor IDL: {e:#}"))?;
+        let summary = json!({ "name": idl.name, "instructions": idl.schema().len(), "events": idl.event_schema().len() });
+        self.store.set_custom_idl(program_id, owner, &serde_json::to_string(json)?)?;
+        self.idls.insert_custom(idl);
+        Ok(summary)
+    }
+
+    /// Goes back to the IDL on chain, if there is one.
+    pub fn clear_custom_idl(&self, program_id: &str) -> Result<bool> {
+        let removed = self.store.delete_custom_idl(program_id)?;
+        self.idls.remove_custom(program_id);
+        Ok(removed)
+    }
+
     /// Everything worth graphing, in Prometheus text format.
     pub fn metrics_text(&self) -> String {
         use crate::prom::Exposition;
@@ -2243,6 +2370,7 @@ impl Sentinel {
             for ps in state.programs.values() {
                 for open in ps.open.values() {
                     let sev = match open.incident.severity {
+                        Severity::Info => "info",
                         Severity::Low => "low",
                         Severity::Medium => "medium",
                         Severity::High => "high",
@@ -2851,6 +2979,8 @@ impl Sentinel {
             ps.rule_firing.retain(|id, _| ids.contains(id));
         }
         state.rules = rules;
+        drop(state);
+        self.sync_filters();
         Ok(())
     }
 
@@ -3001,7 +3131,7 @@ fn vault_evidence(d: &Drain, symbol: &str) -> serde_json::Value {
 }
 
 /// Evidence keys set by detectors that `refresh_evidence` must not drop.
-const KEPT_EVIDENCE: [&str; 4] = ["authority", "deploy", "vault", "dependency"];
+const KEPT_EVIDENCE: [&str; 5] = ["authority", "deploy", "vault", "dependency", "proposal"];
 
 fn refresh_evidence(open: &mut OpenIncident, fps: &HashMap<String, Fingerprint>, labels: &HashMap<String, String>) {
     let total: u64 = open.fingerprint_counts.values().map(|(c, _)| c).sum();

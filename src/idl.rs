@@ -114,7 +114,11 @@ impl Idl {
     pub fn parse(program_id: &str, v: &Value) -> Result<Self> {
         let legacy = v.get("metadata").and_then(|m| m.get("spec")).is_none();
         let mut instructions = Vec::new();
-        for ix in v["instructions"].as_array().context("no instructions")? {
+        // A schema for a program that is not Anchor may declare only events.
+        if v["instructions"].as_array().is_none_or(|i| i.is_empty()) && v["events"].as_array().is_none_or(|e| e.is_empty()) {
+            bail!("it declares no instructions and no events");
+        }
+        for ix in v["instructions"].as_array().into_iter().flatten() {
             let name = ix["name"].as_str().context("unnamed instruction")?.to_string();
             let discriminator = match ix.get("discriminator").and_then(Value::as_array) {
                 Some(d) => d.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect(),
@@ -442,6 +446,8 @@ pub struct IdlRegistry {
     rpc: Option<Arc<RpcClient>>,
     cache: RwLock<HashMap<String, Option<Arc<Idl>>>>,
     inflight: Mutex<HashSet<String>>,
+    /// Programs whose IDL a person supplied; a lookup on chain never replaces these.
+    custom: RwLock<HashSet<String>>,
 }
 
 impl IdlRegistry {
@@ -455,6 +461,7 @@ impl IdlRegistry {
             rpc,
             cache: RwLock::new(HashMap::new()),
             inflight: Mutex::new(HashSet::new()),
+            custom: RwLock::new(HashSet::new()),
         })
     }
 
@@ -465,6 +472,22 @@ impl IdlRegistry {
 
     pub fn insert(&self, idl: Idl) {
         self.cache.write().unwrap().insert(idl.program_id.clone(), Some(Arc::new(idl)));
+    }
+
+    /// Uses an IDL a person supplied for this program, in place of any found on chain.
+    pub fn insert_custom(&self, idl: Idl) {
+        self.custom.write().unwrap().insert(idl.program_id.clone());
+        self.insert(idl);
+    }
+
+    /// Drops a supplied IDL; the next lookup reads the chain again.
+    pub fn remove_custom(&self, program: &str) {
+        self.custom.write().unwrap().remove(program);
+        self.cache.write().unwrap().remove(program);
+    }
+
+    pub fn is_custom(&self, program: &str) -> bool {
+        self.custom.read().unwrap().contains(program)
     }
 
     /// Starts a background fetch if this program hasn't been looked up yet.
@@ -502,8 +525,11 @@ impl IdlRegistry {
                 None
             }
         };
-        self.cache.write().unwrap().insert(program.to_string(), idl.clone());
         self.inflight.lock().unwrap().remove(program);
+        if self.is_custom(program) {
+            return self.cached(program);
+        }
+        self.cache.write().unwrap().insert(program.to_string(), idl.clone());
         idl
     }
 

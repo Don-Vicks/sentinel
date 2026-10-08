@@ -9,7 +9,7 @@ export const CHANNELS: Record<ChannelType, { label: string; hint: string }> = {
   webhook: { label: 'Webhook', hint: 'Any HTTPS endpoint. Receives the JSON payload with a lifecycle field (opened, updated, resolved).' },
 };
 
-const SEVERITIES: Severity[] = ['low', 'medium', 'high', 'critical'];
+const SEVERITIES: Severity[] = ['info', 'low', 'medium', 'high', 'critical'];
 
 export interface ChannelDraft {
   type: ChannelType;

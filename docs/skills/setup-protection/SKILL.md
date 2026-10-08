@@ -14,8 +14,9 @@ This skill needs the Sentinel MCP server with a **write** token (see `docs/MCP.m
 3. **Name the money.** Call `list_vaults`. If none are watched and `candidates` exist, ask the user which are the program's treasury or vaults, then `set_vaults`. Explain that a drain opens an incident when a vault loses 20% of its balance or $100,000 in ten minutes.
 4. **Choose where alerts go.** Call `list_rules`. If any rule already has channels, offer to reuse them with `channels_from_rule` so no secret is handled. Otherwise ask which channel they use. Never ask them to paste a bot token, routing key or webhook into this chat: tell them to add the channel on the Alerts page, then reuse it.
 5. **Create the rules.** Call `protect_program`. It creates: any incident of high severity or above, failure rate above 20%, an admin instruction from a wallet that never called one before, health below 60, and Sentinel's own feed problems. Rules that already exist are skipped.
-6. **Prove it works.** Call `test_rule` on one of the new rules, then `list_deliveries` and confirm it arrived.
-7. **Offer a daily summary.** Explain it can be scheduled to the same channel from the Summary tab of the program page, and `send_summary_now` sends an existing schedule immediately.
+6. **Tailor it to the program.** Call `suggest_rules`. If the program has an IDL it returns rules read from it, each with a reason: authority and admin changes, pause controls, funds leaving, configuration changes, and the events that announce them. Show them to the user, say why each is proposed, and let them choose. Withdrawals can come with a size threshold (`needs_value`): ask for the number, in the token's smallest unit (1 SOL is 1000000000). Create the chosen ones with `apply_suggestions`, passing `ids`, any `values` and the same channels. If `idl_loaded` is false, say that rules about arguments and events need an IDL and move on.
+7. **Prove it works.** Call `test_rule` on one of the new rules, then `list_deliveries` and confirm it arrived.
+8. **Offer a daily summary.** Explain it can be scheduled to the same channel from the Summary tab of the program page, and `send_summary_now` sends an existing schedule immediately.
 
 ## Afterwards
 

@@ -218,6 +218,8 @@ impl IncidentKind {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
+    /// Worth knowing, not worth acting on: a Squads vote, a routine event.
+    Info,
     Low,
     Medium,
     High,
@@ -578,6 +580,23 @@ pub enum Condition {
         /// Only when the signer has never called a matching instruction before.
         #[serde(default)]
         first_seen_signer: bool,
+    },
+    /// A Squads action on a multisig that controls the program: a proposal approved, an
+    /// execution, a settings change. Sentinel streams the multisig's transactions for this.
+    Squads {
+        /// The multisig (v3, v4) or settings account (v5).
+        multisig: String,
+        /// Squads instruction names to match, as for instructions: `*execute*`, `approve_proposal|proposal_approve`.
+        /// Empty matches every action, including ones Sentinel can't name.
+        #[serde(default)]
+        actions: String,
+        /// Only transactions that involve this vault of the multisig (an execution that moves
+        /// its funds or signs as it). Proposal votes name no vault, so they never match.
+        #[serde(default)]
+        vault_index: Option<u8>,
+        /// Only successful transactions (the default): a failed action changed nothing.
+        #[serde(default = "yes_default")]
+        success_only: bool,
     },
     /// An event the program emitted (`emit!` or `emit_cpi!`), matched on its decoded name and fields.
     /// Needs the program's Anchor IDL.

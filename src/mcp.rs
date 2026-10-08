@@ -251,13 +251,34 @@ Give `channels` (slack/telegram/pagerduty/discord/webhook) or `channels_from_rul
                     "name": { "type": "string" },
                     "program": { "type": "string", "description": "Program address or label; omit for every program you watch." },
                     "condition": { "type": "object" },
-                    "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+                    "severity": { "type": "string", "enum": ["info", "low", "medium", "high", "critical"] },
                     "channels": { "type": "array", "items": { "type": "object" } },
                     "channels_from_rule": { "type": "integer", "description": "Copy channels (with their secrets) from one of your rules." },
                     "create_incident": { "type": "boolean" },
                     "cooldown_secs": { "type": "integer" }
                 }),
                 &["name", "condition"],
+            ),
+            write: true,
+        },
+        Tool {
+            name: "suggest_rules",
+            description: "Alert rules worth having for a program, read from its Anchor IDL: authority and admin changes, pause controls, funds leaving (with a size threshold you must choose), configuration changes, and the events that announce them. Each says why. Nothing is created; show them to the user, then create the ones they pick with apply_suggestions.",
+            schema: object(json!({ "program": program }), &["program"]),
+            write: false,
+        },
+        Tool {
+            name: "apply_suggestions",
+            description: "Create suggested rules by id (from suggest_rules) on the channels given, or copied from one of your rules with channels_from_rule. A suggestion that needs a number (a size threshold) must have one in `values`, keyed by suggestion id, in the token's smallest unit. Rules that already exist are left alone.",
+            schema: object(
+                json!({
+                    "program": program,
+                    "ids": { "type": "array", "items": { "type": "string" } },
+                    "values": { "type": "object", "description": "Thresholds by suggestion id, e.g. {\"instruction:large:withdraw\": 5000000000}" },
+                    "channels": { "type": "array", "items": { "type": "object" } },
+                    "channels_from_rule": { "type": "integer" }
+                }),
+                &["program", "ids"],
             ),
             write: true,
         },
@@ -603,6 +624,23 @@ async fn run_tool(s: &Arc<Sentinel>, ctx: &Ctx, name: &str, args: &Value) -> Res
             }
             let input: RuleInput = serde_json::from_value(Value::Object(input)).map_err(|e| format!("Invalid rule: {e}"))?;
             json_out(api::create_rule_inner(s, account.to_string(), input).await.map_err(api_err)?)
+        }
+        "suggest_rules" => {
+            let id = resolve_program(s, str_arg(args, "program")?)?;
+            json_out(api::suggestions_inner(s, &id).await.map_err(api_err)?)
+        }
+        "apply_suggestions" => {
+            let id = resolve_program(s, str_arg(args, "program")?)?;
+            let ids: Vec<String> = serde_json::from_value(args["ids"].clone()).map_err(|_| "`ids` must be a list of suggestion ids".to_string())?;
+            let values: std::collections::HashMap<String, serde_json::Number> = match args.get("values").filter(|v| !v.is_null()) {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|_| "`values` must map suggestion ids to numbers".to_string())?,
+                None => Default::default(),
+            };
+            let channels: Vec<crate::model::Channel> = match args.get("channels").filter(|c| !c.is_null()) {
+                Some(c) => serde_json::from_value(c.clone()).map_err(|e| format!("Invalid channels: {e}"))?,
+                None => Vec::new(),
+            };
+            json_out(api::apply_suggestions_inner(s, account, &id, ids, values, channels, args["channels_from_rule"].as_i64()).await.map_err(api_err)?)
         }
         "protect_program" => {
             let id = resolve_program(s, str_arg(args, "program")?)?;

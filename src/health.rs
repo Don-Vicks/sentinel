@@ -108,6 +108,7 @@ fn incidents(open: &[Incident]) -> Check {
         return check("incidents", "Open incidents", 30, Status::Pass, Some(100), "No open incidents.".into());
     }
     let weight = |s: Severity| match s {
+        Severity::Info => 0.0,
         Severity::Low => 5.0,
         Severity::Medium => 20.0,
         Severity::High => 40.0,
@@ -115,7 +116,7 @@ fn incidents(open: &[Incident]) -> Check {
     };
     let penalty: f64 = open.iter().map(|i| weight(i.severity)).sum();
     let count = |sev: Severity| open.iter().filter(|i| i.severity == sev).count();
-    let parts: Vec<String> = [(Severity::Critical, "critical"), (Severity::High, "high"), (Severity::Medium, "medium"), (Severity::Low, "low")]
+    let parts: Vec<String> = [(Severity::Critical, "critical"), (Severity::High, "high"), (Severity::Medium, "medium"), (Severity::Low, "low"), (Severity::Info, "info")]
         .into_iter()
         .filter(|(s, _)| count(*s) > 0)
         .map(|(s, n)| format!("{} {n}", count(s)))
@@ -389,6 +390,18 @@ mod tests {
         assert_eq!(rel.status, Status::Fail);
         assert!(rel.detail.contains("45.0%") && rel.detail.contains("normal 2.0%"), "{}", rel.detail);
         assert!(h.headline.contains("Failure rate") || h.headline.contains("Open incidents"), "{}", h.headline);
+    }
+
+    #[test]
+    fn an_info_incident_is_listed_but_costs_nothing() {
+        let s = snapshot();
+        let calm = evaluate(&inputs(&s, &[])).score.unwrap();
+        let open = [incident(Severity::Info)];
+        let h = evaluate(&inputs(&s, &open));
+        assert_eq!(h.score.unwrap(), calm, "{h:?}");
+        assert!(Severity::Info < Severity::Low && Severity::Low < Severity::Medium);
+        let worse = [incident(Severity::Low)];
+        assert!(evaluate(&inputs(&s, &worse)).score.unwrap() < calm);
     }
 
     #[test]

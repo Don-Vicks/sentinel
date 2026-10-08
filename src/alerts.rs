@@ -418,6 +418,7 @@ fn incident_link(alert: &Alert) -> &str {
 
 fn severity_word(s: Severity) -> &'static str {
     match s {
+        Severity::Info => "Info",
         Severity::Low => "Low",
         Severity::Medium => "Medium",
         Severity::High => "High",
@@ -524,6 +525,7 @@ fn color(alert: &Alert) -> u32 {
             Severity::High => 0xD9480F,
             Severity::Medium => 0xCA8A04,
             Severity::Low => 0x475467,
+            Severity::Info => 0x2E90FA,
         },
     }
 }
@@ -657,7 +659,7 @@ fn pagerduty_body(alert: &Alert, routing_key: &str, dedup_key: &str, action: &st
         Severity::Critical => "critical",
         Severity::High => "error",
         Severity::Medium => "warning",
-        Severity::Low => "info",
+        Severity::Low | Severity::Info => "info",
     };
     let prefix = if alert.event == AlertEvent::Test { "[TEST] " } else { "" };
     let mut body = json!({

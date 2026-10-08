@@ -12,7 +12,7 @@ import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs } from '.
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
-type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'event' | 'system' | 'health' | 'wallet';
+type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'event' | 'squads' | 'system' | 'health' | 'wallet';
 
 const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
   { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
@@ -25,6 +25,7 @@ const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: numb
   { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
   { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0 },
   { id: 'event', label: 'The program emits an event', unit: '', defaultValue: 0 },
+  { id: 'squads', label: 'A Squads multisig acts (a vote, an execution)', unit: '', defaultValue: 0 },
   { id: 'health', label: 'The program\'s health score drops below', unit: '/ 100', defaultValue: 70 },
   { id: 'wallet', label: 'A wallet\'s SOL balance drops below', unit: 'SOL', defaultValue: 1 },
   { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0 },
@@ -88,6 +89,8 @@ function describe(c: Condition) {
       return `${short(c.account)} holds less than ${c.below_sol} SOL`;
     case 'system':
       return `Sentinel itself is blind (${c.kinds.length ? c.kinds.join(' / ').replace(/_/g, ' ') : 'feed stalled or RPC failing'}), and when it recovers`;
+    case 'squads':
+      return `Squads ${c.actions || 'any action'} on ${short(c.multisig)}${c.vault_index != null ? `, vault ${c.vault_index}` : ''}`;
     case 'event': {
       const symbols: Record<FilterOp, string> = { eq: '=', ne: '≠', gt: '>', gte: '≥', lt: '<', lte: '≤', contains: 'contains', exists: 'is present' };
       const conds = c.filters.map((f) => (f.op === 'exists' ? `${f.path.replace(/^fields\./, '')} is present` : `${f.path.replace(/^fields\./, '')} ${symbols[f.op]} ${f.value}`)).join(c.match_mode === 'any' ? ' or ' : ' and ');
@@ -126,6 +129,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [createIncident, setCreateIncident] = useState(true);
   const [channels, setChannels] = useState<ChannelDraft[]>([]);
   const [walletAccount, setWalletAccount] = useState('');
+  const [multisig, setMultisig] = useState('');
+  const [squadsActions, setSquadsActions] = useState('');
+  const [vaultIndex, setVaultIndex] = useState('');
   const [ixName, setIxName] = useState('');
   const [ixFilters, setIxFilters] = useState<FilterDraft[]>([]);
   const [ixMode, setIxMode] = useState<'all' | 'any'>('all');
@@ -161,6 +167,9 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     if (template === 'system') return { type: 'system', kinds: [] };
     if (template === 'health') return { type: 'health', below: Math.min(100, Math.max(1, Math.round(v))) };
     if (template === 'wallet') return { type: 'wallet_balance', account: walletAccount.trim(), below_sol: v };
+    if (template === 'squads') {
+      return { type: 'squads', multisig: multisig.trim(), actions: squadsActions.trim(), vault_index: vaultIndex.trim() === '' ? null : Number(vaultIndex), success_only: ixSuccess };
+    }
     if (template === 'event') {
       return {
         type: 'event',
@@ -190,6 +199,11 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Name an instruction, add a condition, or choose first-time signers; otherwise this would fire on every call.');
       return;
     }
+    if (template === 'squads') {
+      if (!multisig.trim()) return setError('Enter the multisig address.');
+      if (!program) return setError('Pick the program this multisig controls.');
+      if (vaultIndex.trim() !== '' && !(Number.isInteger(Number(vaultIndex)) && Number(vaultIndex) >= 0 && Number(vaultIndex) <= 255)) return setError('The vault index is a whole number from 0 to 255.');
+    }
     if (template === 'event' && !ixName.trim() && !ixFilters.some((f) => f.path.trim())) {
       setError('Name an event or add a condition; otherwise this would fire on every event.');
       return;
@@ -198,7 +212,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       setError('Enter the wallet address to watch.');
       return;
     }
-    if (template !== 'incident' && template !== 'instruction' && template !== 'event' && template !== 'system' && !(Number(value) > 0)) {
+    if (template !== 'incident' && template !== 'instruction' && template !== 'event' && template !== 'squads' && template !== 'system' && !(Number(value) > 0)) {
       setError('Enter a threshold greater than zero.');
       return;
     }
@@ -210,7 +224,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
     setBusy(true);
     try {
       await send('POST', '/api/rules', {
-        name: name.trim() || (template === 'instruction' ? `${ixName.trim() || 'Instruction'} called` : template === 'event' ? `${ixName.trim() || 'Event'} emitted` : `${tpl.label} ${template === 'incident' ? minSeverity : value}${tpl.unit}`),
+        name: name.trim() || (template === 'instruction' ? `${ixName.trim() || 'Instruction'} called` : template === 'event' ? `${ixName.trim() || 'Event'} emitted` : template === 'squads' ? `Squads ${squadsActions.trim() || 'activity'}` : `${tpl.label} ${template === 'incident' ? minSeverity : value}${tpl.unit}`),
         program_id: program || null,
         condition: condition(),
         create_incident: template === 'incident' || template === 'system' ? false : createIncident,
@@ -287,6 +301,10 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <p className="md:col-span-2 text-xs text-ink-3">
             Fires when the chain tip stops advancing on Sentinel's stream (detectors pause, so a quiet program isn't reported as down) or when RPC calls keep failing, and again when it recovers.
           </p>
+        ) : template === 'squads' ? (
+          <p className="md:col-span-2 text-xs text-ink-3">
+            Sentinel streams this multisig's transactions. Works for Squads v3, v4 and v5; the program above is the one it controls.
+          </p>
         ) : template === 'instruction' || template === 'event' ? (
           <div className="md:col-span-2 text-xs text-ink-3">
             {program
@@ -303,7 +321,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           <div className="md:col-span-2">
             <label className="sr-only" htmlFor="rule-min-sev">Minimum severity</label>
             <select id="rule-min-sev" className="input" value={minSeverity} onChange={(e) => setMinSeverity(e.target.value as Severity)}>
-              {(['low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+              {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
         ) : (
@@ -333,6 +351,30 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
           </>
         )}
       </fieldset>
+
+      {template === 'squads' && (
+        <div className="grid gap-3 rounded-md border border-line p-3 md:grid-cols-[2fr_2fr_1fr]">
+          <div>
+            <label className="label" htmlFor="sq-ms">Multisig address</label>
+            <input id="sq-ms" className="input font-mono" value={multisig} onChange={(e) => setMultisig(e.target.value)} placeholder="The multisig (v5: the settings account)" autoComplete="off" />
+          </div>
+          <div>
+            <label className="label" htmlFor="sq-actions">Actions</label>
+            <input id="sq-actions" className="input font-mono" value={squadsActions} onChange={(e) => setSquadsActions(e.target.value)} placeholder="*execute*, or proposal_approve|approve_proposal" autoComplete="off" />
+          </div>
+          <div>
+            <label className="label" htmlFor="sq-vault">Vault index</label>
+            <input id="sq-vault" className="input num" type="number" min="0" max="255" value={vaultIndex} onChange={(e) => setVaultIndex(e.target.value)} placeholder="any" />
+          </div>
+          <p className="md:col-span-3 text-xs text-ink-3">
+            Leave actions empty to match every action. A vault index matches transactions that involve that vault, such as an execution that signs as it; a proposal vote names no vault, so it never matches. Names: v4 <code>vault_transaction_execute</code>, <code>proposal_approve</code>, <code>config_transaction_execute</code>; v5 <code>execute_transaction</code>, <code>execute_transaction_sync</code>, <code>approve_proposal</code>.
+          </p>
+          <label className="md:col-span-3 flex items-center gap-2 text-sm text-ink-2">
+            <input type="checkbox" checked={ixSuccess} onChange={(e) => setIxSuccess(e.target.checked)} />
+            Only successful transactions
+          </label>
+        </div>
+      )}
 
       {(template === 'instruction' || template === 'event') && (
         <div className="grid gap-3 rounded-md border border-line p-3">
@@ -410,7 +452,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         <div>
           <label className="label" htmlFor="rule-severity">Severity</label>
           <select id="rule-severity" className="input" value={severity} onChange={(e) => setSeverity(e.target.value as Severity)}>
-            {(['low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+            {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
           </select>
         </div>
         <div>

@@ -59,8 +59,9 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/transactions", get(program_transactions))
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
-        .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/idl", get(program_idl).put(put_program_idl).delete(delete_program_idl))
         .route("/api/programs/{id}/events", get(program_events))
+        .route("/api/programs/{id}/suggestions", get(program_suggestions).post(apply_program_suggestions))
         .route("/api/programs/{id}/protect", post(protect_program))
         .route("/api/programs/{id}/mute", axum::routing::put(mute_program))
         .route("/api/programs/{id}/dependencies", get(program_dependencies))
@@ -518,28 +519,147 @@ async fn program_dependencies(State(s): State<AppState>, Path(id): Path<String>)
     Ok(Json(s.dependencies(&id).ok_or_else(|| not_found("program"))?))
 }
 
+/// Largest IDL accepted: the biggest on-chain ones are a few hundred kilobytes.
+const MAX_IDL_BYTES: usize = 2 * 1024 * 1024;
+
+/// Uses an IDL the caller supplies (the JSON `anchor build` writes) in place of the chain's.
+async fn put_program_idl(State(s): State<AppState>, Account(account): Account, Path(id): Path<String>, body: axum::body::Bytes) -> ApiResult<Value> {
+    if !s.is_watching(&account, &id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    if body.len() > MAX_IDL_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "That IDL is larger than 2 MB".into()));
+    }
+    let json: Value = serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("That is not JSON: {e}")))?;
+    let summary = s.set_custom_idl(&id, &account, &json).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(summary))
+}
+
+/// Drops the supplied IDL and goes back to the one on chain.
+async fn delete_program_idl(State(s): State<AppState>, Account(account): Account, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_watching(&account, &id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    Ok(Json(json!({ "removed": s.clear_custom_idl(&id)? })))
+}
+
 /// The program's instructions with the accounts and arguments a rule can filter on.
 async fn program_idl(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     if !s.is_monitored(&id) {
         return Err(not_found("program"));
     }
     Ok(Json(match s.idls.get(&id).await {
-        Some(idl) => json!({ "loaded": true, "name": idl.name, "instructions": idl.schema(), "events": idl.event_schema() }),
-        None => json!({ "loaded": false, "name": null, "instructions": [], "events": [] }),
+        Some(idl) => json!({ "loaded": true, "custom": s.idls.is_custom(&id), "name": idl.name, "instructions": idl.schema(), "events": idl.event_schema() }),
+        None => json!({ "loaded": false, "custom": false, "name": null, "instructions": [], "events": [] }),
     }))
 }
 
 /// The latest events the program emitted, decoded with its IDL.
-async fn program_events(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+#[derive(Deserialize)]
+struct EventsQuery {
+    name: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn program_events(State(s): State<AppState>, Path(id): Path<String>, Query(q): Query<EventsQuery>) -> ApiResult<Value> {
     if !s.is_monitored(&id) {
         return Err(not_found("program"));
     }
     let idl = s.idls.get(&id).await;
+    let name = q.name.as_deref().filter(|n| !n.is_empty());
     Ok(Json(json!({
         "idl_loaded": idl.is_some(),
+        "custom_idl": s.idls.is_custom(&id),
         "declares_events": idl.as_ref().is_some_and(|i| i.has_events()),
-        "events": s.recent_events(&id, 100),
+        "names": s.store.event_counts(&id)?.into_iter().map(|(name, count)| json!({ "name": name, "count": count })).collect::<Vec<_>>(),
+        "events": s.recent_events(&id, name, q.limit.unwrap_or(100).clamp(1, 500)),
     })))
+}
+
+/// Rules worth having for this program, read from its IDL.
+async fn program_suggestions(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+    Ok(Json(suggestions_inner(&s, &id).await?))
+}
+
+pub(crate) async fn suggestions_inner(s: &Sentinel, id: &str) -> Result<Value, ApiError> {
+    if !s.is_monitored(id) {
+        return Err(not_found("program"));
+    }
+    Ok(match s.idls.get(id).await {
+        Some(idl) => json!({ "idl_loaded": true, "suggestions": crate::suggest::from_idl(&idl) }),
+        None => json!({ "idl_loaded": false, "suggestions": [] }),
+    })
+}
+
+#[derive(Deserialize)]
+struct ApplyInput {
+    ids: Vec<String>,
+    /// The number each suggestion that asks for one needs, by suggestion id.
+    #[serde(default)]
+    values: std::collections::HashMap<String, serde_json::Number>,
+    #[serde(default)]
+    channels: Vec<Channel>,
+    channels_from_rule: Option<i64>,
+}
+
+async fn apply_program_suggestions(
+    State(s): State<AppState>,
+    Account(account): Account,
+    Path(id): Path<String>,
+    Json(body): Json<ApplyInput>,
+) -> ApiResult<Value> {
+    Ok(Json(apply_suggestions_inner(&s, &account, &id, body.ids, body.values, body.channels, body.channels_from_rule).await?))
+}
+
+/// Creates the chosen suggested rules on the channels given. A rule that already exists (same
+/// name, same program) is left alone, so applying twice changes nothing.
+pub(crate) async fn apply_suggestions_inner(
+    s: &Sentinel,
+    account: &str,
+    program_id: &str,
+    ids: Vec<String>,
+    values: std::collections::HashMap<String, serde_json::Number>,
+    mut channels: Vec<Channel>,
+    reuse: Option<i64>,
+) -> Result<Value, ApiError> {
+    if !s.is_watching(account, program_id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    let idl = s.idls.get(program_id).await.ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "This program has no Anchor IDL to suggest rules from".into()))?;
+    if let Some(from) = reuse {
+        let source = s.store.rules()?.into_iter().find(|r| r.id == from && r.owner.as_deref() == Some(account)).ok_or_else(|| not_found("rule"))?;
+        channels = source.targets();
+    }
+    if channels.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Choose where alerts should go: add a channel, or reuse one from an existing rule".into()));
+    }
+    let all = crate::suggest::from_idl(&idl);
+    let label = s.program_labels().get(program_id).cloned().unwrap_or_else(|| program_id.to_string());
+    let existing: Vec<String> = s.store.rules()?.into_iter().filter(|r| r.owner.as_deref() == Some(account)).map(|r| format!("{}|{}", r.program_id.as_deref().unwrap_or(""), r.name)).collect();
+    let mut created = Vec::new();
+    let mut skipped = Vec::new();
+    for id in &ids {
+        let Some(sg) = all.iter().find(|x| &x.id == id) else {
+            return Err(ApiError(StatusCode::BAD_REQUEST, format!("No suggestion \"{id}\" for this program")));
+        };
+        let name = format!("{label}: {}", sg.title);
+        if existing.contains(&format!("{program_id}|{name}")) {
+            skipped.push(name);
+            continue;
+        }
+        let mut condition = sg.condition.clone();
+        if let Some(need) = &sg.needs_value {
+            let value = values.get(id).filter(|v| v.as_f64().is_some_and(|f| f > 0.0)).ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, format!("\"{}\" needs a value: {}", sg.title, need.label)))?;
+            condition["filters"][0]["value"] = Value::Number(value.clone());
+        }
+        let input: RuleInput = serde_json::from_value(json!({
+            "name": name, "program_id": program_id, "condition": condition, "severity": sg.severity,
+            "create_incident": sg.create_incident, "channels": channels,
+        }))
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("Invalid rule: {e}")))?;
+        created.push(create_rule_inner(s, account.to_string(), input).await?);
+    }
+    Ok(json!({ "created": created, "already_had": skipped }))
 }
 
 async fn program_health(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
@@ -738,6 +858,14 @@ async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), 
     if let Some(pid) = input.program_id.as_deref().filter(|p| !p.is_empty()) {
         if !s.is_watching(account, pid) {
             return Err(forbidden("Rules can only target programs on your watchlist"));
+        }
+    }
+    if let Condition::Squads { multisig, .. } = &input.condition {
+        if <solana_sdk::pubkey::Pubkey as std::str::FromStr>::from_str(multisig.trim()).is_err() {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "Enter the multisig's address".into()));
+        }
+        if input.program_id.as_deref().is_none_or(str::is_empty) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "Pick the program this multisig controls".into()));
         }
     }
     if input.channels.len() > MAX_CHANNELS {

@@ -19,6 +19,7 @@ const SEVERITY: Record<Severity, { cls: string; label: string; Icon: typeof Info
   high: { cls: 'bg-serious-soft text-serious', label: 'High', Icon: AlertTriangle },
   medium: { cls: 'bg-warn-soft text-warn', label: 'Medium', Icon: AlertTriangle },
   low: { cls: 'bg-sunken text-ink-2', label: 'Low', Icon: Info },
+  info: { cls: 'bg-accent-soft text-accent', label: 'Info', Icon: Info },
 };
 
 export function SeverityBadge({ severity }: { severity: Severity }) {

@@ -13,6 +13,8 @@ use std::sync::Mutex;
 use vortex::events::VortexTransaction;
 
 /// Hourly rollups are kept this long.
+/// Decoded events are kept this long, and at most 100,000 of them.
+const EVENT_RETENTION_DAYS: i64 = 7;
 const ROLLUP_RETENTION_SECS: i64 = 35 * 24 * 3600;
 
 pub struct Store {
@@ -91,6 +93,21 @@ CREATE TABLE IF NOT EXISTS summary_schedules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS program_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id TEXT NOT NULL,
+    at TEXT NOT NULL,
+    signature TEXT NOT NULL,
+    name TEXT NOT NULL,
+    fields TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS program_events_by_program ON program_events(program_id, id);
+CREATE TABLE IF NOT EXISTS custom_idls (
+    program_id TEXT PRIMARY KEY,
+    idl TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS delivery_refs (
     rule_id INTEGER NOT NULL,
     incident_id INTEGER NOT NULL,
@@ -160,6 +177,10 @@ impl Store {
         removed += conn.execute(
             "DELETE FROM rollups WHERE hour < ?1",
             [chrono::Utc::now().timestamp() - ROLLUP_RETENTION_SECS],
+        )?;
+        removed += conn.execute(
+            "DELETE FROM program_events WHERE at < ?1 OR id <= (SELECT MAX(id) FROM program_events) - 100000",
+            [(chrono::Utc::now() - chrono::Duration::days(EVENT_RETENTION_DAYS)).to_rfc3339()],
         )?;
         removed += conn.execute(
             "DELETE FROM delivery_refs WHERE incident_id NOT IN (SELECT id FROM incidents)",
@@ -578,6 +599,73 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT data FROM summary_schedules ORDER BY id")?;
         let rows = stmt.query_map([], |r| parse(r.get(0)?))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- program events ---
+
+    /// Stores decoded events in one SQLite transaction.
+    pub fn insert_events(&self, events: &[(String, crate::events::EventRecord)]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let t = conn.transaction()?;
+        {
+            let mut stmt = t.prepare("INSERT INTO program_events(program_id, at, signature, name, fields) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+            for (program, e) in events {
+                stmt.execute(params![program, e.at.to_rfc3339(), e.signature, e.name, serde_json::to_string(&e.fields)?])?;
+            }
+        }
+        t.commit()?;
+        Ok(())
+    }
+
+    /// The latest events of a program, newest first, optionally of one name.
+    pub fn events(&self, program_id: &str, name: Option<&str>, limit: usize) -> Result<Vec<crate::events::EventRecord>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT at, signature, name, fields FROM program_events
+             WHERE program_id = ?1 AND (?2 IS NULL OR name = ?2) ORDER BY id DESC LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![program_id, name, limit as i64], |r| {
+            let at: String = r.get(0)?;
+            let fields: String = r.get(3)?;
+            Ok(crate::events::EventRecord {
+                at: chrono::DateTime::parse_from_rfc3339(&at).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now()),
+                signature: r.get(1)?,
+                name: r.get(2)?,
+                fields: serde_json::from_str(&fields).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The names of the events a program has emitted, with counts, most frequent first.
+    pub fn event_counts(&self, program_id: &str) -> Result<Vec<(String, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT name, COUNT(*) FROM program_events WHERE program_id = ?1 GROUP BY name ORDER BY COUNT(*) DESC LIMIT 50")?;
+        let rows = stmt.query_map([program_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? as u64)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    // --- IDLs a person supplied ---
+
+    pub fn set_custom_idl(&self, program_id: &str, owner: &str, idl: &str) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "INSERT INTO custom_idls(program_id, idl, owner, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(program_id) DO UPDATE SET idl = excluded.idl, owner = excluded.owner, updated_at = excluded.updated_at",
+            params![program_id, idl, owner, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_custom_idl(&self, program_id: &str) -> Result<bool> {
+        Ok(self.conn.lock().unwrap().execute("DELETE FROM custom_idls WHERE program_id = ?1", [program_id])? > 0)
+    }
+
+    /// `(program, idl json, owner)` for every IDL a person supplied.
+    pub fn custom_idls(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT program_id, idl, owner FROM custom_idls")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
