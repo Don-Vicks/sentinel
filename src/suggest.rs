@@ -35,7 +35,7 @@ pub struct Suggestion {
 const AUTHORITY: &str = "*authority*|*admin*|*owner*|*upgrade*|*governance*";
 const PAUSE: &str = "pause*|unpause*|freeze*|thaw*|halt*|emergency*|shutdown*|*kill_switch*";
 const FUNDS: &str = "withdraw*|sweep*|drain*|collect_*|*treasury*|*vault_out*|claim_fee*|close*";
-const CONFIG: &str = "set_*|update_*|configure*|*config*|*params*|*fee*|*whitelist*|*blacklist*|migrate*";
+const CONFIG: &str = "set_*|update_*|configure*|*config*|*params*|*whitelist*|*blacklist*|migrate*";
 
 /// Instructions are assigned to the first group they match, most serious first.
 const GROUPS: [(&str, &str, Severity, &str); 4] = [

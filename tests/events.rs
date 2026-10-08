@@ -8,6 +8,7 @@ use sentinel::model::*;
 use sentinel::source::VortexSource;
 use sentinel::store::Store;
 use serde_json::{json, Value};
+use solana_sdk::pubkey::Pubkey;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use vortex::events::VortexTransaction;
@@ -158,5 +159,58 @@ async fn without_the_idl_event_rules_wait_instead_of_guessing() {
     assert!(rule_incidents(&store, any.id).is_empty(), "event names come from the IDL");
     s.flush();
     assert!(s.recent_events(PUMP, None, 10).is_empty());
+    let _ = std::fs::remove_file(&dir);
+}
+
+#[tokio::test]
+async fn a_hand_written_schema_decodes_events_of_a_program_that_is_not_anchor() {
+    // A native program that logs `[tag u8][amount u64][user pubkey]` with sol_log_data, and has no IDL.
+    let schema = json!({
+        "events": [
+            { "name": "Deposit", "discriminator": [7], "fields": [{ "name": "amount", "type": "u64" }, { "name": "user", "type": "pubkey" }] },
+            { "name": "Halted", "discriminator": [9], "fields": [] }
+        ]
+    });
+    let user = Pubkey::new_from_array([3; 32]);
+    let log_event = |tag: u8, amount: Option<u64>| {
+        let mut data = vec![tag];
+        if let Some(a) = amount {
+            data.extend(a.to_le_bytes());
+            data.extend(user.to_bytes());
+        }
+        format!("Program data: {}", base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data))
+    };
+    let mut tx = fixture("pump_ok");
+    tx.instructions.clear();
+    tx.logs = vec![
+        format!("Program {PUMP} invoke [1]"),
+        log_event(7, Some(2_500_000_000)),
+        log_event(9, None),
+        log_event(1, None), // a tag the schema doesn't name
+        format!("Program {PUMP} success"),
+    ];
+
+    let (store, s, dir) = sentinel("schema");
+    let big = rule(&store, "Big deposit", event("Deposit", vec![filter("fields.amount", FilterOp::Gt, json!(1_000_000_000u64))]));
+    let halted = rule(&store, "Halted", event("Halted", vec![]));
+    let small = rule(&store, "Small deposit", event("Deposit", vec![filter("fields.amount", FilterOp::Lt, json!(1000))]));
+    s.reload_rules().unwrap();
+
+    // Not an IDL at all, and not a schema: refused with a reason.
+    assert!(s.set_custom_idl(PUMP, "me", &json!({ "hello": "world" })).is_err());
+    let summary = s.set_custom_idl(PUMP, "me", &schema).unwrap();
+    assert_eq!((summary["instructions"].as_u64(), summary["events"].as_u64()), (Some(0), Some(2)));
+
+    let got = sentinel::events::emitted(&tx, PUMP, &s.idls.cached(PUMP).unwrap());
+    assert_eq!(got.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), vec!["Deposit", "Halted"], "{got:?}");
+    assert_eq!(got[0].fields["amount"], 2_500_000_000u64);
+    assert_eq!(got[0].fields["user"], user.to_string());
+
+    s.on_transaction(Arc::new(tx));
+    s.flush();
+    assert_eq!(rule_incidents(&store, big.id).len(), 1);
+    assert_eq!(rule_incidents(&store, halted.id).len(), 1);
+    assert!(rule_incidents(&store, small.id).is_empty());
+    assert_eq!(s.recent_events(PUMP, None, 10).len(), 2);
     let _ = std::fs::remove_file(&dir);
 }

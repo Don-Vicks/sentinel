@@ -114,7 +114,11 @@ impl Idl {
     pub fn parse(program_id: &str, v: &Value) -> Result<Self> {
         let legacy = v.get("metadata").and_then(|m| m.get("spec")).is_none();
         let mut instructions = Vec::new();
-        for ix in v["instructions"].as_array().context("no instructions")? {
+        // A schema for a program that is not Anchor may declare only events.
+        if v["instructions"].as_array().is_none_or(|i| i.is_empty()) && v["events"].as_array().is_none_or(|e| e.is_empty()) {
+            bail!("it declares no instructions and no events");
+        }
+        for ix in v["instructions"].as_array().into_iter().flatten() {
             let name = ix["name"].as_str().context("unnamed instruction")?.to_string();
             let discriminator = match ix.get("discriminator").and_then(Value::as_array) {
                 Some(d) => d.iter().filter_map(|b| b.as_u64().map(|b| b as u8)).collect(),

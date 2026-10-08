@@ -60,7 +60,7 @@ function IdlUpload({ programId, custom, onChange }: { programId: string; custom:
       </label>
       {custom && <button type="button" className="btn h-8 text-xs" onClick={remove} disabled={busy}>Use the IDL on chain</button>}
       <span className="text-ink-3">
-        {custom ? 'Using an IDL you supplied.' : 'The JSON `anchor build` writes (target/idl/<name>.json), for programs that keep no IDL on chain.'}
+        {custom ? 'Using an IDL you supplied.' : 'The JSON `anchor build` writes (target/idl/<name>.json), or a hand-written events schema for a program that is not Anchor (see the README).'}
       </span>
       {note && <span className="text-good" role="status">{note}</span>}
       {error && <span className="text-crit" role="alert">{error}</span>}
