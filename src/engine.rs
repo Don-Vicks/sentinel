@@ -458,6 +458,20 @@ impl Sentinel {
         // and the code accounts of the programs these ones depend on.
         let data: Vec<String> = ids.iter().chain(deps.iter()).filter_map(|p| crate::posture::programdata_address(p)).collect();
         ids.extend(data);
+        // Multisigs that rules watch.
+        let multisigs: Vec<String> = {
+            let state = self.state.lock().unwrap();
+            state
+                .rules
+                .iter()
+                .filter(|r| r.enabled)
+                .filter_map(|r| match &r.condition {
+                    Condition::Squads { multisig, .. } => Some(multisig.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        ids.extend(multisigs);
         self.source.watch_programs(ids);
     }
 
@@ -501,6 +515,16 @@ impl Sentinel {
                     for event in crate::posture::detect(&tx, &dep, &code) {
                         let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
                         self.dependency_incident(ps, &tx, &summary, event, second);
+                    }
+                }
+            }
+            // A multisig this program's rules watch: its actions are not traffic to the program.
+            let watching: Vec<&AlertRule> = rules.iter().filter(|r| applies(r, &pid, &ps.watchers)).collect();
+            for rule in watching {
+                if let Condition::Squads { multisig, .. } = &rule.condition {
+                    if tx.touches(multisig) {
+                        let summary = summarize(&tx, &pid, &self.prices, Some(&self.idls));
+                        alerts.extend(self.squads_rule(ps, rule, &tx, &summary, second));
                     }
                 }
             }
@@ -1448,6 +1472,48 @@ impl Sentinel {
         None
     }
 
+    /// Matches a Squads rule against the actions the transaction made on its multisig.
+    fn squads_rule(
+        &self,
+        ps: &mut ProgramState,
+        rule: &AlertRule,
+        tx: &Arc<VortexTransaction>,
+        summary: &TxSummary,
+        second: i64,
+    ) -> Option<Alert> {
+        let Condition::Squads { multisig, actions, vault_index, success_only } = &rule.condition else {
+            return None;
+        };
+        if *success_only && !tx.success {
+            return None;
+        }
+        for action in crate::squads::actions(tx, multisig) {
+            let name = action.instruction.unwrap_or_default();
+            if !actions.trim().is_empty() && (name.is_empty() || !crate::instruction_rule::name_matches(actions, name)) {
+                continue;
+            }
+            let mut vault = String::new();
+            if let Some(index) = vault_index {
+                let Some(address) = crate::squads::vault_address(&action.program_id, multisig, *index) else { continue };
+                if !tx.touches(&address) {
+                    continue;
+                }
+                vault = format!(", vault {index}");
+            }
+            let msg = format!(
+                "{} {} on {}{}{} in {}",
+                action.program,
+                if name.is_empty() { "action".to_string() } else { name.to_string() },
+                short_sig(multisig),
+                vault,
+                action.member.as_deref().map(|m| format!(" by {}", short_sig(m))).unwrap_or_default(),
+                short_sig(&tx.signature)
+            );
+            return self.fire_rule(ps, rule, msg, 1.0, LinkFilter::Manual, true, second, Some((tx, summary)));
+        }
+        None
+    }
+
     /// Keeps the program's latest decoded events for the dashboard.
     fn note_events(&self, ps: &mut ProgramState, tx: &VortexTransaction) {
         if !tx.success || !crate::events::may_carry(tx) {
@@ -1988,6 +2054,7 @@ impl Sentinel {
                 Condition::Incident { .. }
                 | Condition::Instruction { .. }
                 | Condition::Event { .. }
+                | Condition::Squads { .. }
                 | Condition::System { .. }
                 | Condition::Health { .. }
                 | Condition::WalletBalance { .. } => (None, 60),
@@ -2851,6 +2918,8 @@ impl Sentinel {
             ps.rule_firing.retain(|id, _| ids.contains(id));
         }
         state.rules = rules;
+        drop(state);
+        self.sync_filters();
         Ok(())
     }
 

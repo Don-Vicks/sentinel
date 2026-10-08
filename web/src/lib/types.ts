@@ -279,6 +279,7 @@ export type Condition =
       success_only: boolean;
       first_seen_signer: boolean;
     }
+  | { type: 'squads'; multisig: string; actions: string; vault_index?: number | null; success_only: boolean }
   | {
       type: 'event';
       name: string;

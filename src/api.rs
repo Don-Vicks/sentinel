@@ -740,6 +740,14 @@ async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), 
             return Err(forbidden("Rules can only target programs on your watchlist"));
         }
     }
+    if let Condition::Squads { multisig, .. } = &input.condition {
+        if <solana_sdk::pubkey::Pubkey as std::str::FromStr>::from_str(multisig.trim()).is_err() {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "Enter the multisig's address".into()));
+        }
+        if input.program_id.as_deref().is_none_or(str::is_empty) {
+            return Err(ApiError(StatusCode::BAD_REQUEST, "Pick the program this multisig controls".into()));
+        }
+    }
     if input.channels.len() > MAX_CHANNELS {
         return Err(ApiError(StatusCode::BAD_REQUEST, format!("A rule can have at most {MAX_CHANNELS} channels")));
     }
