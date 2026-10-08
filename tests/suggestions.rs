@@ -14,6 +14,8 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tower::ServiceExt;
 use vortex::events::VortexTransaction;
+use vortex::geyser::decode::decode_transaction;
+use vortex::geyser::rpc_frame::frame_from_rpc_json;
 use vortex::hub::HubStats;
 
 
@@ -140,5 +142,81 @@ async fn suggestions_come_from_the_idl_and_apply_once() {
     // An id that isn't a suggestion is refused.
     let (st, _, _) = call(&app, "POST", &format!("/api/programs/{PUMP}/suggestions"), Some(&cookie), Some(json!({ "ids": ["nope"], "channels": [{ "type": "slack", "url": "https://hooks.slack.com/services/T/B/x" }] }))).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+    let _ = std::fs::remove_file(&db);
+}
+
+fn fixture(name: &str) -> VortexTransaction {
+    let path = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
+    let f: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let resp = &f["response"];
+    let frame = frame_from_rpc_json(f["signature"].as_str().unwrap(), resp["slot"].as_u64().unwrap(), resp).unwrap();
+    decode_transaction(frame, vec![]).unwrap()
+}
+
+#[tokio::test]
+async fn an_idl_you_supply_decodes_events_and_both_survive_a_restart() {
+    let db = std::env::temp_dir().join(format!("sentinel-custom-idl-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&db);
+    let make = || {
+        let store = Arc::new(Store::open(db.to_str().unwrap()).unwrap());
+        let (bus, _) = broadcast::channel(4);
+        Sentinel::new(store, Arc::new(NullSource(bus)), None, PriceBook::new(), "https://sentinel.example".into()).unwrap()
+    };
+    let s = make();
+    s.add_program(PUMP.into(), None).unwrap();
+    let app = sentinel::api::router(s.clone());
+    let cookie = sign_in(&app, &Keypair::new()).await;
+    let stranger = sign_in(&app, &Keypair::new()).await;
+    let (st, _, _) = call(&app, "POST", "/api/programs", Some(&cookie), Some(json!({ "program_id": PUMP }))).await;
+    assert!(st.is_success());
+
+    // Nothing on chain (no RPC here) and nothing supplied: events can't be named.
+    s.on_transaction(Arc::new(fixture("pump_ok")));
+    s.flush();
+    let (_, none, _) = call(&app, "GET", &format!("/api/programs/{PUMP}/events"), None, None).await;
+    assert_eq!((none["idl_loaded"].as_bool(), none["events"].as_array().unwrap().len()), (Some(false), 0));
+
+    // Supplying one needs an account that watches the program, and a real IDL.
+    let data = std::fs::read(format!("{}/tests/fixtures/pump_idl_account.bin", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    let idl_json = sentinel::idl::decode_idl_account(&data).unwrap();
+    let uri = format!("/api/programs/{PUMP}/idl");
+    assert_eq!(call(&app, "PUT", &uri, None, Some(idl_json.clone())).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&app, "PUT", &uri, Some(&stranger), Some(idl_json.clone())).await.0, StatusCode::FORBIDDEN, "not watching");
+    let (st, bad, _) = call(&app, "PUT", &uri, Some(&cookie), Some(json!({ "hello": "world" }))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}");
+    assert!(bad.to_string().contains("not an Anchor IDL"), "{bad}");
+    let (st, ok, _) = call(&app, "PUT", &uri, Some(&cookie), Some(idl_json)).await;
+    assert_eq!(st, StatusCode::OK, "{ok}");
+    assert!(ok["events"].as_u64().unwrap() > 10 && ok["instructions"].as_u64().unwrap() > 10);
+    let (_, shown, _) = call(&app, "GET", &uri, None, None).await;
+    assert_eq!((shown["loaded"].as_bool(), shown["custom"].as_bool()), (Some(true), Some(true)));
+
+    // Events from now on are decoded and kept.
+    s.on_transaction(Arc::new(VortexTransaction { signature: "again".into(), ..fixture("pump_ok") }));
+    s.flush();
+    let (_, got, _) = call(&app, "GET", &format!("/api/programs/{PUMP}/events"), None, None).await;
+    assert_eq!(got["custom_idl"], true);
+    assert_eq!(got["events"].as_array().unwrap().len(), 1, "{got}");
+    assert_eq!(got["events"][0]["name"], "TradeEvent");
+    assert_eq!(got["names"][0]["name"], "TradeEvent");
+    assert_eq!(got["names"][0]["count"], 1);
+    let (_, filtered, _) = call(&app, "GET", &format!("/api/programs/{PUMP}/events?name=CreateEvent"), None, None).await;
+    assert!(filtered["events"].as_array().unwrap().is_empty());
+    drop(app);
+    drop(s);
+
+    // A restart: the IDL and the event are still there.
+    let s2 = make();
+    assert!(s2.idls.is_custom(PUMP) && s2.idls.cached(PUMP).is_some());
+    assert_eq!(s2.recent_events(PUMP, None, 10).len(), 1);
+
+    // Removing it goes back to nothing (there is no chain here).
+    let app2 = sentinel::api::router(s2.clone());
+    let cookie2 = sign_in(&app2, &Keypair::new()).await;
+    let _ = call(&app2, "POST", "/api/programs", Some(&cookie2), Some(json!({ "program_id": PUMP }))).await;
+    let (st, gone, _) = call(&app2, "DELETE", &uri, Some(&cookie2), None).await;
+    assert_eq!(st, StatusCode::OK, "{gone}");
+    assert_eq!(gone["removed"], true);
+    assert!(!s2.idls.is_custom(PUMP));
     let _ = std::fs::remove_file(&db);
 }

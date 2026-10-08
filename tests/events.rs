@@ -136,14 +136,15 @@ async fn event_rules_fire_on_decoded_names_and_fields() {
     assert_eq!(incident.observed, Some(60623340.0));
 
     // The dashboard keeps what was decoded.
-    let recent = s.recent_events(PUMP, 10);
+    s.flush();
+    let recent = s.recent_events(PUMP, None, 10);
     assert_eq!(recent.len(), 1);
     assert_eq!(recent[0].name, "TradeEvent");
 
     // A failed transaction emitted nothing that stuck.
     s.on_transaction(Arc::new(fixture("pump_failed")));
     assert_eq!(rule_incidents(&store, any.id).len(), 1);
-    assert_eq!(s.recent_events(PUMP, 10).len(), 1);
+    assert_eq!(s.recent_events(PUMP, None, 10).len(), 1);
     let _ = std::fs::remove_file(&dir);
 }
 
@@ -155,6 +156,7 @@ async fn without_the_idl_event_rules_wait_instead_of_guessing() {
     s.on_transaction(Arc::new(fixture("pump_ok")));
     s.flush();
     assert!(rule_incidents(&store, any.id).is_empty(), "event names come from the IDL");
-    assert!(s.recent_events(PUMP, 10).is_empty());
+    s.flush();
+    assert!(s.recent_events(PUMP, None, 10).is_empty());
     let _ = std::fs::remove_file(&dir);
 }

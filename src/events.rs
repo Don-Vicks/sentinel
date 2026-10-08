@@ -5,11 +5,22 @@
 
 use crate::idl::Idl;
 use base64::Engine;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use vortex::events::VortexTransaction;
 
 /// First eight bytes of an `emit_cpi!` instruction: the instruction data is this tag, then the event.
 pub const EVENT_IX_TAG: [u8; 8] = [0xe4, 0x45, 0xa5, 0x2e, 0x51, 0xcb, 0x9a, 0x1d];
+
+/// A decoded event, as kept for the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventRecord {
+    pub at: DateTime<Utc>,
+    pub signature: String,
+    pub name: String,
+    pub fields: Value,
+}
 
 /// An event a transaction emitted.
 #[derive(Debug, Clone)]

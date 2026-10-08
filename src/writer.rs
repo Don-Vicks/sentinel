@@ -2,6 +2,7 @@
 //! batches, so a failure storm on a busy program never blocks ingest on disk
 //! I/O or JSON serialization while the engine lock is held.
 
+use crate::events::EventRecord;
 use crate::model::TxSummary;
 use crate::store::Store;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -14,6 +15,7 @@ const MAX_WAIT: Duration = Duration::from_millis(100);
 
 enum Job {
     Link(i64, TxSummary, Arc<VortexTransaction>),
+    Event(String, EventRecord),
     Flush(mpsc::Sender<()>),
 }
 
@@ -28,6 +30,7 @@ impl Writer {
             .name("sentinel-writer".into())
             .spawn(move || {
                 let mut batch = Vec::with_capacity(MAX_BATCH);
+                let mut events: Vec<(String, EventRecord)> = Vec::new();
                 let mut waiters = Vec::new();
                 while let Ok(first) = rx.recv() {
                     let deadline = Instant::now() + MAX_WAIT;
@@ -37,13 +40,14 @@ impl Writer {
                     loop {
                         match next.take() {
                             Some(Job::Link(id, s, t)) => batch.push((id, s, t)),
+                            Some(Job::Event(program, e)) => events.push((program, e)),
                             Some(Job::Flush(done)) => {
                                 waiters.push(done);
                                 break;
                             }
                             None => {}
                         }
-                        if batch.len() >= MAX_BATCH {
+                        if batch.len() + events.len() >= MAX_BATCH {
                             break;
                         }
                         let left = deadline.saturating_duration_since(Instant::now());
@@ -59,6 +63,12 @@ impl Writer {
                         }
                         batch.clear();
                     }
+                    if !events.is_empty() {
+                        if let Err(e) = store.insert_events(&events) {
+                            tracing::error!(error = %e, n = events.len(), "failed to store program events");
+                        }
+                        events.clear();
+                    }
                     for w in waiters.drain(..) {
                         let _ = w.send(());
                     }
@@ -70,6 +80,10 @@ impl Writer {
 
     pub fn link(&self, incident_id: i64, summary: TxSummary, tx: Arc<VortexTransaction>) {
         let _ = self.tx.send(Job::Link(incident_id, summary, tx));
+    }
+
+    pub fn event(&self, program_id: &str, event: EventRecord) {
+        let _ = self.tx.send(Job::Event(program_id.to_string(), event));
     }
 
     /// Blocks until everything queued so far is on disk.

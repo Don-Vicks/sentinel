@@ -87,10 +87,11 @@ impl AuthorityEvent {
     pub fn executed_by(&self) -> String {
         match &self.via {
             Some(v) => format!(
-                "{} multisig {}{}{}",
+                "{} {} {}{}{}",
                 v.program,
+                if v.program == "Realms" { "governance" } else { "multisig" },
                 short(&v.multisig),
-                v.executor.as_deref().map(|e| format!(" (member {})", short(e))).unwrap_or_default(),
+                v.executor.as_deref().map(|e| format!(" ({} {})", if v.program == "Realms" { "executed by" } else { "member" }, short(e))).unwrap_or_default(),
                 self.multisig.as_ref().map(|m| format!(", {}", m.describe())).unwrap_or_default()
             ),
             None => self.authority.as_deref().map(short).unwrap_or_else(|| "unknown".into()),

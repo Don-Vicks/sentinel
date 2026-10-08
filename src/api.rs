@@ -59,7 +59,7 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/programs/{id}/transactions", get(program_transactions))
         .route("/api/programs/{id}/posture", get(program_posture))
         .route("/api/programs/{id}/health", get(program_health))
-        .route("/api/programs/{id}/idl", get(program_idl))
+        .route("/api/programs/{id}/idl", get(program_idl).put(put_program_idl).delete(delete_program_idl))
         .route("/api/programs/{id}/events", get(program_events))
         .route("/api/programs/{id}/suggestions", get(program_suggestions).post(apply_program_suggestions))
         .route("/api/programs/{id}/protect", post(protect_program))
@@ -519,27 +519,60 @@ async fn program_dependencies(State(s): State<AppState>, Path(id): Path<String>)
     Ok(Json(s.dependencies(&id).ok_or_else(|| not_found("program"))?))
 }
 
+/// Largest IDL accepted: the biggest on-chain ones are a few hundred kilobytes.
+const MAX_IDL_BYTES: usize = 2 * 1024 * 1024;
+
+/// Uses an IDL the caller supplies (the JSON `anchor build` writes) in place of the chain's.
+async fn put_program_idl(State(s): State<AppState>, Account(account): Account, Path(id): Path<String>, body: axum::body::Bytes) -> ApiResult<Value> {
+    if !s.is_watching(&account, &id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    if body.len() > MAX_IDL_BYTES {
+        return Err(ApiError(StatusCode::PAYLOAD_TOO_LARGE, "That IDL is larger than 2 MB".into()));
+    }
+    let json: Value = serde_json::from_slice(&body).map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("That is not JSON: {e}")))?;
+    let summary = s.set_custom_idl(&id, &account, &json).map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
+    Ok(Json(summary))
+}
+
+/// Drops the supplied IDL and goes back to the one on chain.
+async fn delete_program_idl(State(s): State<AppState>, Account(account): Account, Path(id): Path<String>) -> ApiResult<Value> {
+    if !s.is_watching(&account, &id) {
+        return Err(forbidden("Watch the program first"));
+    }
+    Ok(Json(json!({ "removed": s.clear_custom_idl(&id)? })))
+}
+
 /// The program's instructions with the accounts and arguments a rule can filter on.
 async fn program_idl(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
     if !s.is_monitored(&id) {
         return Err(not_found("program"));
     }
     Ok(Json(match s.idls.get(&id).await {
-        Some(idl) => json!({ "loaded": true, "name": idl.name, "instructions": idl.schema(), "events": idl.event_schema() }),
-        None => json!({ "loaded": false, "name": null, "instructions": [], "events": [] }),
+        Some(idl) => json!({ "loaded": true, "custom": s.idls.is_custom(&id), "name": idl.name, "instructions": idl.schema(), "events": idl.event_schema() }),
+        None => json!({ "loaded": false, "custom": false, "name": null, "instructions": [], "events": [] }),
     }))
 }
 
 /// The latest events the program emitted, decoded with its IDL.
-async fn program_events(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Value> {
+#[derive(Deserialize)]
+struct EventsQuery {
+    name: Option<String>,
+    limit: Option<usize>,
+}
+
+async fn program_events(State(s): State<AppState>, Path(id): Path<String>, Query(q): Query<EventsQuery>) -> ApiResult<Value> {
     if !s.is_monitored(&id) {
         return Err(not_found("program"));
     }
     let idl = s.idls.get(&id).await;
+    let name = q.name.as_deref().filter(|n| !n.is_empty());
     Ok(Json(json!({
         "idl_loaded": idl.is_some(),
+        "custom_idl": s.idls.is_custom(&id),
         "declares_events": idl.as_ref().is_some_and(|i| i.has_events()),
-        "events": s.recent_events(&id, 100),
+        "names": s.store.event_counts(&id)?.into_iter().map(|(name, count)| json!({ "name": name, "count": count })).collect::<Vec<_>>(),
+        "events": s.recent_events(&id, name, q.limit.unwrap_or(100).clamp(1, 500)),
     })))
 }
 
