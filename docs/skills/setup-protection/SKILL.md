@@ -15,7 +15,7 @@ This skill needs the Sentinel MCP server with a **write** token (see `docs/MCP.m
 4. **Choose where alerts go.** Call `list_rules`. If any rule already has channels, offer to reuse them with `channels_from_rule` so no secret is handled. Otherwise ask which channel they use. Never ask them to paste a bot token, routing key or webhook into this chat: tell them to add the channel on the Alerts page, then reuse it.
 5. **Create the rules.** Call `protect_program`. It creates: any incident of high severity or above, failure rate above 20%, an admin instruction from a wallet that never called one before, health below 60, and Sentinel's own feed problems. Rules that already exist are skipped.
 6. **Prove it works.** Call `test_rule` on one of the new rules, then `list_deliveries` and confirm it arrived.
-7. **Offer a daily summary.** Explain it can be scheduled to the same channel from the program's Summary page, and `send_summary_now` sends an existing schedule immediately.
+7. **Offer a daily summary.** Explain it can be scheduled to the same channel from the Summary tab of the program page, and `send_summary_now` sends an existing schedule immediately.
 
 ## Afterwards
 

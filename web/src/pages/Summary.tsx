@@ -1,13 +1,11 @@
 import { useState } from 'react';
-import { Link, useParams } from 'react-router';
+import { Link } from 'react-router';
 import { CalendarClock, Pause, Play, Send, Trash2 } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
-import { usePrograms } from '../lib/programs';
 import type { Summary, SummaryActivity, SummarySchedule } from '../lib/types';
 import { ago, compact, duration, explorer, KIND_LABEL, num, pct, short, usd } from '../lib/format';
 import { HourlyBars, ShareBar, Sparkline } from '../components/charts';
-import { Empty, ErrorState, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, Spinner, Stat } from '../components/ui';
-import { HealthCard } from '../components/HealthCard';
+import { Empty, ErrorState, PageSkeleton, Panel, SeverityBadge, Segmented, Spinner, Stat } from '../components/ui';
 import { RequireAccount } from '../components/SignIn';
 import { CHANNELS, ChannelEditor, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
 
@@ -163,21 +161,17 @@ function Schedules({ programId }: { programId: string }) {
   );
 }
 
-export function ProgramSummary() {
-  const { id = '' } = useParams();
-  const { programs } = usePrograms();
+/** What the program did over a period, with the schedules that deliver it. Lives in the program's Summary tab. */
+export function SummaryView({ id }: { id: string }) {
   const [period, setPeriod] = useState<Period>('24h');
   const { data, error, loading, reload } = useFetch<Summary>(`/api/programs/${id}/summary?period=${period}`);
-  const label = programs.find((p) => p.program_id === id)?.label ?? short(id);
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        crumbs={[{ label: 'Overview', to: '/' }, { label, to: `/programs/${id}` }]}
-        title="Summary"
-        meta={data?.headline ?? `What ${label} did`}
-        actions={<Segmented label="Period" value={period} options={[...PERIODS]} onChange={setPeriod} />}
-      />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-ink-2">{data?.headline ?? 'What this program did'}</p>
+        <Segmented label="Period" value={period} options={[...PERIODS]} onChange={setPeriod} />
+      </div>
       {error ? (
         <ErrorState message={error} onRetry={reload} />
       ) : loading && !data ? (
@@ -189,7 +183,7 @@ export function ProgramSummary() {
           ) : (
             <>
               <Tiles s={data} />
-              <div className="grid gap-4 xl:grid-cols-[2fr_1fr]">
+              <div>
                 <Panel title="Transactions per hour">
                   <div className="p-3">
                     <HourlyBars points={data.hourly} />
@@ -207,7 +201,6 @@ export function ProgramSummary() {
                     )}
                   </div>
                 </Panel>
-                <HealthCard programId={id} />
               </div>
               <div className="grid gap-4 xl:grid-cols-2">
                 <Panel title="Top instructions">

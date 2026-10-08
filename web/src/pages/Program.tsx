@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router';
-import { ArrowRight, FileText, Pause, Play, Star } from 'lucide-react';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
+import { ArrowRight, ExternalLink, Pause, Play, Star } from 'lucide-react';
 import { send, useFetch } from '../lib/api';
 import { useLive } from '../lib/live';
 import { usePrograms } from '../lib/programs';
@@ -8,7 +8,7 @@ import { useAuth } from '../lib/auth';
 import type { Incident, MonitoredProgram, ProgramSnapshot, SeriesPoint, Severity, TxSummary } from '../lib/types';
 import { compact, duration, KIND_LABEL, num, pct } from '../lib/format';
 import { ActivityChart, LineChart, ShareBar, Sparkline } from '../components/charts';
-import { Address, Empty, ErrorState, HealthDot, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, ShowMore, Stat } from '../components/ui';
+import { Address, Empty, ErrorState, HealthDot, PageHeader, PageSkeleton, Panel, SeverityBadge, Segmented, ShowMore, Stat, Tabs } from '../components/ui';
 import { IncidentList, mergeIncident } from '../components/IncidentList';
 import { TxTable } from '../components/TxTable';
 import { PostureCard } from '../components/PostureCard';
@@ -17,6 +17,10 @@ import { FundsCard } from '../components/FundsCard';
 import { DependenciesCard } from '../components/DependenciesCard';
 import { MuteControl } from '../components/MuteControl';
 import { ProtectCard } from '../components/ProtectCard';
+import { SummaryView } from './Summary';
+
+const TABS = ['overview', 'activity', 'security', 'summary'] as const;
+type Tab = (typeof TABS)[number];
 
 const SEVERITY_RANK: Record<Severity, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
@@ -97,6 +101,10 @@ interface Detail {
 export function Program() {
   const { id = '' } = useParams();
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const tabParam = params.get('tab') as Tab | null;
+  const tab: Tab = tabParam && TABS.includes(tabParam) ? tabParam : 'overview';
+  const setTab = (t: Tab) => setParams(t === 'overview' ? {} : { tab: t }, { replace: true });
   const { reload: reloadPrograms } = usePrograms();
   const { account, watching, refresh: refreshAuth, requestSignIn } = useAuth();
   const [watchBusy, setWatchBusy] = useState(false);
@@ -210,10 +218,7 @@ export function Program() {
         actions={
           <>
           <Link to={`/status/${id}`} className="btn" target="_blank" title="A public page for this program, with an embeddable badge">
-            Status page
-          </Link>
-          <Link to={`/programs/${id}/summary`} className="btn">
-            <FileText className="size-4" aria-hidden /> Summary
+            <ExternalLink className="size-4" aria-hidden /> Status page
           </Link>
           <button
             className={isWatching ? 'btn' : 'btn-primary'}
@@ -239,205 +244,237 @@ export function Program() {
 
       {open.length > 0 && <IncidentBanner incidents={open} />}
 
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-        <Stat
-          label="Throughput (10s)"
-          value={`${compact(s.tps_10s)} tx/s`}
-          sub={base(`${compact(s.baseline_tps)} tx/s`)}
-          badge={ratioBadge(s.tps_10s, s.baseline_tps, learning)}
-          spark={<Sparkline values={sparkTps} height={26} />}
-        />
-        <Stat
-          label="Failure rate (60s)"
-          value={pct(s.failure_rate_60s)}
-          sub={`${base(pct(s.baseline_failure_rate))} · ${num(s.failed_60s)}/${num(s.tx_60s)} tx`}
-          tone={failTone}
-          badge={ratioBadge(s.failure_rate_60s, s.baseline_failure_rate, learning, 1)}
-          spark={<Sparkline values={sparkFail} tone="fail" height={26} />}
-        />
-        <Stat
-          label="Avg compute (60s)"
-          value={`${compact(s.avg_cu_60s)} CU`}
-          sub={`max ${compact(s.max_cu_60s)} · ${base(compact(s.baseline_avg_cu))}`}
-          badge={ratioBadge(s.avg_cu_60s, s.baseline_avg_cu, learning)}
-          spark={<Sparkline values={sparkCu} tone="muted" height={26} />}
-        />
-        <Stat
-          label="Unique signers (60s)"
-          value={num(s.unique_signers_60s)}
-          sub={`fees ${s.fees_60s_sol.toFixed(4)} SOL`}
-        />
-      </div>
+      <Tabs
+        label="Program sections"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { value: 'overview', label: 'Overview', badge: open.length, tone: 'crit' },
+          { value: 'activity', label: 'Activity' },
+          { value: 'security', label: 'Security' },
+          { value: 'summary', label: 'Summary' },
+        ]}
+      />
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Panel title="Transactions per second">
-          <div className="p-3">
-            {data.series.length > 1 ? <ActivityChart points={data.series} /> : <Empty title="Collecting data" />}
-          </div>
-        </Panel>
-        <Panel title="Average compute units per transaction">
-          <div className="p-3">
-            {data.series.length > 1 ? (
-              <LineChart
-                points={data.series}
-                value={(p) => (p.tx ? p.avg_cu : null)}
-                label="avg CU"
-                baseline={s.baseline_avg_cu || undefined}
-                format={(v) => num(v)}
-              />
-            ) : (
-              <Empty title="Collecting data" />
-            )}
-          </div>
-        </Panel>
-      </div>
+      {tab === 'overview' && (
+        <div role="tabpanel" id="panel-overview" aria-labelledby="tab-overview" className="space-y-6">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <Stat
+            label="Throughput (10s)"
+            value={`${compact(s.tps_10s)} tx/s`}
+            sub={base(`${compact(s.baseline_tps)} tx/s`)}
+            badge={ratioBadge(s.tps_10s, s.baseline_tps, learning)}
+            spark={<Sparkline values={sparkTps} height={26} />}
+          />
+          <Stat
+            label="Failure rate (60s)"
+            value={pct(s.failure_rate_60s)}
+            sub={`${base(pct(s.baseline_failure_rate))} · ${num(s.failed_60s)}/${num(s.tx_60s)} tx`}
+            tone={failTone}
+            badge={ratioBadge(s.failure_rate_60s, s.baseline_failure_rate, learning, 1)}
+            spark={<Sparkline values={sparkFail} tone="fail" height={26} />}
+          />
+          <Stat
+            label="Avg compute (60s)"
+            value={`${compact(s.avg_cu_60s)} CU`}
+            sub={`max ${compact(s.max_cu_60s)} · ${base(compact(s.baseline_avg_cu))}`}
+            badge={ratioBadge(s.avg_cu_60s, s.baseline_avg_cu, learning)}
+            spark={<Sparkline values={sparkCu} tone="muted" height={26} />}
+          />
+          <Stat
+            label="Unique signers (60s)"
+            value={num(s.unique_signers_60s)}
+            sub={`fees ${s.fees_60s_sol.toFixed(4)} SOL`}
+          />
+        </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Panel title="Transactions per second">
+            <div className="p-3">
+              {data.series.length > 1 ? <ActivityChart points={data.series} /> : <Empty title="Collecting data" />}
+            </div>
+          </Panel>
+          <Panel title="Average compute units per transaction">
+            <div className="p-3">
+              {data.series.length > 1 ? (
+                <LineChart
+                  points={data.series}
+                  value={(p) => (p.tx ? p.avg_cu : null)}
+                  label="avg CU"
+                  baseline={s.baseline_avg_cu || undefined}
+                  format={(v) => num(v)}
+                />
+              ) : (
+                <Empty title="Collecting data" />
+              )}
+            </div>
+          </Panel>
+        </div>
+
+        <div className="grid items-start gap-4 xl:grid-cols-2">
         <HealthCard programId={id} />
-        <PostureCard programId={id} incidents={data.incidents} />
-      </div>
-      <ProtectCard programId={id} />
+        {data.incidents.some((i) => i.status === 'resolved') && (
+          <Panel title="Incident history" action={<Link to={`/incidents?program=${id}`} className="link text-xs">All</Link>}>
+            <IncidentList incidents={data.incidents.filter((i) => i.status === 'resolved').slice(0, 8)} showProgram={false} />
+          </Panel>
+        )}
+        </div>
+        </div>
+      )}
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <FundsCard programId={id} />
-        <DependenciesCard programId={id} />
-      </div>
+      {tab === 'activity' && (
+        <div role="tabpanel" id="panel-activity" aria-labelledby="tab-activity" className="space-y-6">
+        <Panel title="Instructions (last 5 min)">
+          {s.instructions.length === 0 ? (
+            <Empty title="No instructions yet" />
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="table table-stack">
+                <thead>
+                  <tr>
+                    <th>Instruction</th>
+                    <th className="w-1/4">Share of transactions</th>
+                    <th className="text-right">Transactions</th>
+                    <th className="text-right">Failure rate</th>
+                    <th className="text-right">Avg compute</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {s.instructions.slice(0, ixShown).map((ix) => (
+                    <tr key={ix.name}>
+                      <td data-primary className="font-medium">
+                        {ix.name === '(unnamed)' ? (
+                          <span title="Transactions that touch this program but whose logs name no instruction, usually bots whose own program fails first">
+                            No instruction named
+                          </span>
+                        ) : (
+                          ix.name
+                        )}
+                      </td>
+                      <td data-label="Share of transactions" data-wide>
+                        <div className="flex items-center gap-2">
+                          <ShareBar share={ix.share} tone="accent" />
+                          <span className="num text-xs w-10 text-right">{(ix.share * 100).toFixed(0)}%</span>
+                        </div>
+                      </td>
+                      <td data-label="Transactions" className="num text-right">{num(ix.tx)}</td>
+                      <td data-label="Failure rate" className={`num text-right ${ix.failure_rate >= Math.max(10, s.baseline_failure_rate * 2) && ix.tx >= 10 ? 'text-crit font-medium' : ''}`}>
+                        {pct(ix.failure_rate)}
+                      </td>
+                      <td data-label="Avg compute" className="num text-right">{compact(ix.avg_cu)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <ShowMore shown={ixShown} total={s.instructions.length} step={20} onMore={() => setIxShown((n) => n + 20)} />
+        </Panel>
 
-      <Panel title="Instructions (last 5 min)">
-        {s.instructions.length === 0 ? (
-          <Empty title="No instructions yet" />
-        ) : (
-          <div className="overflow-x-auto">
+        <Panel
+          title="Why transactions fail (last 60s)"
+          action={
+            s.top_errors.length > 0 && (
+              <Segmented
+                label="Which errors to show"
+                value={errScope}
+                onChange={setErrScope}
+                options={[
+                  { value: 'own', label: `${data.program.label} (${s.top_errors.filter((e) => e.own).length})` },
+                  { value: 'all', label: `All (${s.top_errors.length})` },
+                ]}
+              />
+            )
+          }
+        >
+          {s.top_errors.length === 0 ? (
+            <Empty title="No failures in the last minute" />
+          ) : errRows.length === 0 ? (
+            <Empty title={`No errors raised by ${data.program.label} itself`}>
+              {s.top_errors.length} come from other programs in the same transactions. They count toward the failure rate but don't open
+              incidents. Switch to "All" to see them.
+            </Empty>
+          ) : (
             <table className="table table-stack">
               <thead>
                 <tr>
-                  <th>Instruction</th>
-                  <th className="w-1/4">Share of transactions</th>
-                  <th className="text-right">Transactions</th>
-                  <th className="text-right">Failure rate</th>
-                  <th className="text-right">Avg compute</th>
+                  <th>Error</th>
+                  <th>Raised by</th>
+                  <th className="w-1/3">Share of failures</th>
+                  <th className="text-right">Count</th>
                 </tr>
               </thead>
               <tbody>
-                {s.instructions.slice(0, ixShown).map((ix) => (
-                  <tr key={ix.name}>
+                {errRows.slice(0, errShown).map((e) => (
+                  <tr key={e.key} className={e.own === false ? 'opacity-60' : ''} title={e.own === false ? 'Raised by another program in the same transactions; counts toward the failure rate but opens no incident' : undefined}>
                     <td data-primary className="font-medium">
-                      {ix.name === '(unnamed)' ? (
-                        <span title="Transactions that touch this program but whose logs name no instruction, usually bots whose own program fails first">
-                          No instruction named
-                        </span>
-                      ) : (
-                        ix.name
-                      )}
+                      {e.error}
+                      {e.code !== null && <span className="ml-1.5 num text-xs text-ink-3">#{e.code}</span>}
                     </td>
-                    <td data-label="Share of transactions" data-wide>
+                    <td data-label="Raised by" data-wide className="text-ink-2">
+                      {e.program_name}
+                      {e.instruction && <span className="text-ink-3">::{e.instruction}</span>}
+                    </td>
+                    <td data-label="Share of failures" data-wide>
                       <div className="flex items-center gap-2">
-                        <ShareBar share={ix.share} tone="accent" />
-                        <span className="num text-xs w-10 text-right">{(ix.share * 100).toFixed(0)}%</span>
+                        <ShareBar share={e.share} />
+                        <span className="num text-xs w-10 text-right">{(e.share * 100).toFixed(0)}%</span>
                       </div>
                     </td>
-                    <td data-label="Transactions" className="num text-right">{num(ix.tx)}</td>
-                    <td data-label="Failure rate" className={`num text-right ${ix.failure_rate >= Math.max(10, s.baseline_failure_rate * 2) && ix.tx >= 10 ? 'text-crit font-medium' : ''}`}>
-                      {pct(ix.failure_rate)}
-                    </td>
-                    <td data-label="Avg compute" className="num text-right">{compact(ix.avg_cu)}</td>
+                    <td data-label="Count" className="num text-right">{num(e.count)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          </div>
-        )}
-        <ShowMore shown={ixShown} total={s.instructions.length} step={20} onMore={() => setIxShown((n) => n + 20)} />
-      </Panel>
-
-      <Panel
-        title="Why transactions fail (last 60s)"
-        action={
-          s.top_errors.length > 0 && (
-            <Segmented
-              label="Which errors to show"
-              value={errScope}
-              onChange={setErrScope}
-              options={[
-                { value: 'own', label: `${data.program.label} (${s.top_errors.filter((e) => e.own).length})` },
-                { value: 'all', label: `All (${s.top_errors.length})` },
-              ]}
-            />
-          )
-        }
-      >
-        {s.top_errors.length === 0 ? (
-          <Empty title="No failures in the last minute" />
-        ) : errRows.length === 0 ? (
-          <Empty title={`No errors raised by ${data.program.label} itself`}>
-            {s.top_errors.length} come from other programs in the same transactions. They count toward the failure rate but don't open
-            incidents. Switch to "All" to see them.
-          </Empty>
-        ) : (
-          <table className="table table-stack">
-            <thead>
-              <tr>
-                <th>Error</th>
-                <th>Raised by</th>
-                <th className="w-1/3">Share of failures</th>
-                <th className="text-right">Count</th>
-              </tr>
-            </thead>
-            <tbody>
-              {errRows.slice(0, errShown).map((e) => (
-                <tr key={e.key} className={e.own === false ? 'opacity-60' : ''} title={e.own === false ? 'Raised by another program in the same transactions; counts toward the failure rate but opens no incident' : undefined}>
-                  <td data-primary className="font-medium">
-                    {e.error}
-                    {e.code !== null && <span className="ml-1.5 num text-xs text-ink-3">#{e.code}</span>}
-                  </td>
-                  <td data-label="Raised by" data-wide className="text-ink-2">
-                    {e.program_name}
-                    {e.instruction && <span className="text-ink-3">::{e.instruction}</span>}
-                  </td>
-                  <td data-label="Share of failures" data-wide>
-                    <div className="flex items-center gap-2">
-                      <ShareBar share={e.share} />
-                      <span className="num text-xs w-10 text-right">{(e.share * 100).toFixed(0)}%</span>
-                    </div>
-                  </td>
-                  <td data-label="Count" className="num text-right">{num(e.count)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-        <ShowMore shown={errShown} total={errRows.length} step={20} onMore={() => setErrShown((n) => n + 20)} />
-      </Panel>
-
-      <Panel
-        title="Live transactions"
-        action={
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-ink-2">
-              <input type="checkbox" checked={failedOnly} onChange={(e) => setFailedOnly(e.target.checked)} />
-              Failed only
-            </label>
-            <button className="btn h-8 text-xs" onClick={() => setPaused((p) => !p)} aria-pressed={paused}>
-              {paused ? <Play className="size-3.5" aria-hidden /> : <Pause className="size-3.5" aria-hidden />}
-              {paused ? 'Resume' : 'Pause'}
-            </button>
-          </div>
-        }
-      >
-        {rows.length === 0 ? (
-          <Empty title={failedOnly ? 'No failed transactions yet' : 'Waiting for transactions'}>
-            Transactions appear here the moment Vortex receives them from the stream.
-          </Empty>
-        ) : (
-          <TxTable rows={rows.slice(0, txShown)} fresh={fresh} />
-        )}
-        <ShowMore shown={txShown} total={Math.min(rows.length, 100)} step={25} onMore={() => setTxShown((n) => n + 25)} />
-      </Panel>
-
-      {data.incidents.some((i) => i.status === 'resolved') && (
-        <Panel title="Incident history" action={<Link to={`/incidents?program=${id}`} className="link text-xs">All</Link>}>
-          <IncidentList incidents={data.incidents.filter((i) => i.status === 'resolved').slice(0, 8)} showProgram={false} />
+          )}
+          <ShowMore shown={errShown} total={errRows.length} step={20} onMore={() => setErrShown((n) => n + 20)} />
         </Panel>
+
+        <Panel
+          title="Live transactions"
+          action={
+            <div className="flex items-center gap-2">
+              <label className="flex items-center gap-1.5 text-xs text-ink-2">
+                <input type="checkbox" checked={failedOnly} onChange={(e) => setFailedOnly(e.target.checked)} />
+                Failed only
+              </label>
+              <button className="btn h-8 text-xs" onClick={() => setPaused((p) => !p)} aria-pressed={paused}>
+                {paused ? <Play className="size-3.5" aria-hidden /> : <Pause className="size-3.5" aria-hidden />}
+                {paused ? 'Resume' : 'Pause'}
+              </button>
+            </div>
+          }
+        >
+          {rows.length === 0 ? (
+            <Empty title={failedOnly ? 'No failed transactions yet' : 'Waiting for transactions'}>
+              Transactions appear here the moment Vortex receives them from the stream.
+            </Empty>
+          ) : (
+            <TxTable rows={rows.slice(0, txShown)} fresh={fresh} />
+          )}
+          <ShowMore shown={txShown} total={Math.min(rows.length, 100)} step={25} onMore={() => setTxShown((n) => n + 25)} />
+        </Panel>
+
+        </div>
+      )}
+
+      {tab === 'security' && (
+        <div role="tabpanel" id="panel-security" aria-labelledby="tab-security" className="space-y-6">
+        <PostureCard programId={id} incidents={data.incidents} />
+        <ProtectCard programId={id} />
+
+        <div className="grid gap-4 xl:grid-cols-2">
+          <FundsCard programId={id} />
+          <DependenciesCard programId={id} />
+        </div>
+
+        </div>
+      )}
+
+      {tab === 'summary' && (
+        <div role="tabpanel" id="panel-summary" aria-labelledby="tab-summary">
+          <SummaryView id={id} />
+        </div>
       )}
     </div>
   );
