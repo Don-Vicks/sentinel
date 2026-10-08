@@ -358,6 +358,8 @@ impl Sentinel {
                 }
             });
         }
+        // Answer commands and button taps from the Telegram chats that receive alerts.
+        tokio::spawn(crate::telegram::run(self.clone()));
         // Read the settings of a multisig that executed an upgrade, to say how many must sign.
         if self.rpc.is_some() {
             if let Some(mut inbox) = self.enrich_inbox.lock().unwrap().take() {

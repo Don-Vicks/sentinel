@@ -22,6 +22,7 @@ pub mod metrics;
 pub mod mirage_setup;
 pub mod simulate;
 pub mod summary;
+pub mod telegram;
 pub mod model;
 pub mod posture;
 pub mod prom;

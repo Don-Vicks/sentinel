@@ -632,9 +632,17 @@ fn telegram_body(alert: &Alert, chat_id: &str, reply_to: Option<&str>) -> Value 
         "parse_mode": "HTML",
         "disable_web_page_preview": true,
     });
-    // Telegram only accepts public https links on buttons.
+    // Telegram only accepts public https links on buttons. A callback button works anywhere:
+    // tapping it marks the incident as being investigated.
+    let mut buttons = Vec::new();
     if link.starts_with("https://") {
-        body["reply_markup"] = json!({ "inline_keyboard": [[{ "text": button_label(alert), "url": link }]] });
+        buttons.push(json!({ "text": button_label(alert), "url": link }));
+    }
+    if let (AlertEvent::Opened, Some(id)) = (alert.event, alert.incident_id) {
+        buttons.push(json!({ "text": "👀 Acknowledge", "callback_data": format!("ack:{id}") }));
+    }
+    if !buttons.is_empty() {
+        body["reply_markup"] = json!({ "inline_keyboard": [buttons] });
     }
     if let Some(id) = reply_to.and_then(|r| r.parse::<i64>().ok()) {
         body["reply_to_message_id"] = json!(id);
