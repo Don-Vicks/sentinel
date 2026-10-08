@@ -311,6 +311,7 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 A rule's `channels` is a list of objects, each with a `type` and an optional `min_severity`:
 
 ```json
+{ "type": "slack_bot", "bot_token": "xoxb-...", "channel": "#alerts" }
 { "type": "slack",     "url": "https://hooks.slack.com/services/..." }
 { "type": "discord",   "url": "https://discord.com/api/webhooks/..." }
 { "type": "telegram",  "bot_token": "123456:ABC...", "chat_id": "-1001234567890" }
@@ -328,7 +329,12 @@ How each channel handles an incident over its life:
 |---|---|---|---|
 | Telegram | New message, with a button to the incident when `SENTINEL_PUBLIC_URL` is https | Reply to the first message | Reply to the first message |
 | PagerDuty | `trigger` with `dedup_key` `sentinel-incident-{id}` | `trigger` again, which updates the same alert | `resolve` with the same key |
-| Slack, Discord, webhook | New message | New message | New message |
+| Slack app (`slack_bot`) | New message in the channel | Reply in that message's thread | Reply in that thread |
+| Slack webhook, Discord, webhook | New message | New message | New message |
+
+**Slack:** prefer the **Slack app** channel. Create a Slack app with the `chat:write` scope (add `chat:write.public` to post in channels the bot hasn't joined), install it, paste the Bot User OAuth Token (`xoxb-…`) and a channel (`#alerts` or its id), and invite the bot with `/invite @YourApp`. An incident's escalation and resolution then stay in one thread instead of flooding the channel, and Slack's refusals (bot not in the channel, revoked token, missing scope) come back as readable errors. Incoming webhooks still work but can't thread. Set `SENTINEL_SLACK_API` only to point at a test server.
+
+**Saved destinations.** On the Alerts page, add a channel once under a name, send a test message to it, and pick it in any rule instead of pasting the token again (`GET/POST /api/destinations`, `DELETE /api/destinations/{id}`, `POST /api/destinations/{id}/test`; `POST /api/channels/test` tests a channel from the form before saving, and a rule accepts `destination_ids`). Saving a rule copies the destination's channel, so editing or deleting a destination later doesn't change rules that already use it.
 
 Deliveries to one incident and channel go out in order. Summaries are sent to every channel type except PagerDuty. A failed delivery is retried three times with backoff (not on a client error other than a rate limit) and is logged with the error.
 
@@ -354,7 +360,7 @@ cargo test
 
 `tests/limits.rs` covers the public-instance guards: watchlist and rule caps (the operator is exempt), operator-only detection settings, watcher-only incident updates, per-IP rate limits, and capped sign-in challenges.
 
-`tests/channels.rs` runs an incident through mock Telegram, PagerDuty and Slack servers and checks the whole lifecycle: Telegram replies to the opening message for the escalation and the resolution, PagerDuty resolves what it triggered under one `dedup_key`, Slack gets Block Kit, the delivery log names channel and event, and no secret reaches it. `tests/channels_api.rs` checks that secrets are masked, kept on edit and validated, and that scheduled summaries are validated and private to their owner.
+`tests/channels.rs` runs an incident through mock Telegram, PagerDuty and Slack servers and checks the whole lifecycle: Telegram replies to the opening message for the escalation and the resolution, PagerDuty resolves what it triggered under one `dedup_key`, Slack gets Block Kit, the delivery log names channel and event, and no secret reaches it. `tests/channels_api.rs` checks that secrets are masked, kept on edit and validated, and that scheduled summaries are validated and private to their owner. `tests/slack_bot.rs` checks that an incident stays in one Slack thread, that Slack's refusals come back readable, and that saved destinations are tested, reused by rules and private to their account.
 
 `tests/upgrades.rs` feeds synthetic upgradeable-loader instructions (including a failed one, and a SetAuthority that touches only the ProgramData account) and checks the incidents they open, and that a failure spike 30 seconds after an upgrade carries it as evidence. `tests/vaults.rs` checks that churn which nets out is not a drain and that a real net outflow is, with its severity and the vault status the dashboard reads.
 

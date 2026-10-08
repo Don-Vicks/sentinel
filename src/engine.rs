@@ -3031,6 +3031,11 @@ impl Sentinel {
         Ok(inc)
     }
 
+    /// Sends one test message to a channel and reports the outcome.
+    pub async fn test_channel(&self, channel: &crate::model::Channel, label: &str) -> crate::model::AlertExecution {
+        self.dispatcher.test_channel(channel, label).await
+    }
+
     /// Sends a sample payload through a rule's webhook without waiting for it to fire.
     pub fn test_rule(&self, rule: AlertRule) {
         let program_id = rule.program_id.clone().unwrap_or_else(|| "all".into());

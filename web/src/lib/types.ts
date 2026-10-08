@@ -316,14 +316,25 @@ export interface InstructionSchema {
   args: { path: string; type: string }[];
 }
 
-export type ChannelType = 'slack' | 'telegram' | 'pagerduty' | 'discord' | 'webhook';
+export type ChannelType = 'slack' | 'slack_bot' | 'telegram' | 'pagerduty' | 'discord' | 'webhook';
 
 /** Secrets (bot token, routing key, webhook paths) come back masked and are kept when sent back unchanged. */
 export type Channel = (
   | { type: 'slack' | 'discord' | 'webhook'; url: string }
   | { type: 'telegram'; bot_token: string; chat_id: string }
   | { type: 'pagerduty'; routing_key: string }
+  | { type: 'slack_bot'; bot_token: string; channel: string }
 ) & { min_severity?: Severity | null };
+
+/** A channel saved once under a name and reused by rules. Secrets come back masked. */
+export type Destination = Channel & { id: number; name: string; created_at: string };
+
+export interface ChannelTestResult {
+  delivered: boolean;
+  status_code: number | null;
+  error: string | null;
+  latency_ms: number | null;
+}
 
 export interface AlertRule {
   id: number;

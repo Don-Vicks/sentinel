@@ -15,6 +15,7 @@ use tokio::sync::{broadcast, watch};
 
 const ATTEMPTS: u32 = 3;
 const TELEGRAM_API: &str = "https://api.telegram.org";
+const SLACK_API: &str = "https://slack.com/api";
 const PAGERDUTY_API: &str = "https://events.pagerduty.com/v2/enqueue";
 
 /// Where in an incident's life an alert sits.
@@ -60,6 +61,7 @@ pub struct Dispatcher {
     live: broadcast::Sender<Arc<LiveEvent>>,
     allow_private: bool,
     telegram_api: String,
+    slack_api: String,
     pagerduty_api: String,
     /// The last delivery queued for each (rule, incident, channel). The next one
     /// waits for it, so an escalation never overtakes the message it replies to.
@@ -141,6 +143,15 @@ pub async fn check_channel(channel: &Channel, allow_private: bool) -> anyhow::Re
             }
             Ok(())
         }
+        ChannelKind::SlackBot { bot_token, channel } => {
+            if !bot_token.starts_with("xoxb-") || !bot_token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+                anyhow::bail!("Slack bot token starts with xoxb- (OAuth & Permissions → Bot User OAuth Token)");
+            }
+            if channel.trim().is_empty() {
+                anyhow::bail!("Enter the Slack channel, like #alerts or its channel id (C0123456789)");
+            }
+            Ok(())
+        }
         ChannelKind::Pagerduty { routing_key } => {
             if routing_key.len() < 20 || !routing_key.bytes().all(|b| b.is_ascii_alphanumeric()) {
                 anyhow::bail!("PagerDuty routing key is the 32-character Integration Key of an Events API v2 integration");
@@ -153,6 +164,8 @@ pub async fn check_channel(channel: &Channel, allow_private: bool) -> anyhow::Re
 struct Request {
     url: String,
     body: Value,
+    /// Sent as `Authorization: Bearer …` (Slack's Web API).
+    bearer: Option<String>,
 }
 
 struct Outcome {
@@ -195,10 +208,41 @@ impl Dispatcher {
             live,
             allow_private,
             telegram_api: env_or("SENTINEL_TELEGRAM_API", TELEGRAM_API).trim_end_matches('/').to_string(),
+            slack_api: env_or("SENTINEL_SLACK_API", SLACK_API).trim_end_matches('/').to_string(),
             pagerduty_api: env_or("SENTINEL_PAGERDUTY_API", PAGERDUTY_API),
             chains: Arc::default(),
             stats: Arc::default(),
         }
+    }
+
+    /// Sends one test message to a channel now and reports what happened, without recording it.
+    pub async fn test_channel(&self, channel: &Channel, label: &str) -> AlertExecution {
+        let rule = AlertRule {
+            id: 0,
+            owner: None,
+            name: label.to_string(),
+            program_id: None,
+            condition: crate::model::Condition::System { kinds: Vec::new() },
+            create_incident: false,
+            severity: Severity::Info,
+            webhook_url: None,
+            channels: vec![channel.clone()],
+            enabled: true,
+            cooldown_secs: 0,
+            created_at: Utc::now(),
+            last_fired_at: None,
+        };
+        let alert = Alert {
+            message: "This is a test message from Vortex Sentinel. If you can read it, alerts will reach this channel.".into(),
+            payload: json!({ "event": "sentinel.test", "rule": { "id": 0, "name": label }, "severity": "info", "message": "Test message from Vortex Sentinel", "fired_at": Utc::now() }),
+            program_label: "Sentinel".into(),
+            program_id: "all".into(),
+            incident_id: None,
+            severity: Severity::Info,
+            event: AlertEvent::Test,
+            rule,
+        };
+        self.deliver(&alert, 0, channel).await
     }
 
     /// Records the alert and delivers it to each of the rule's channels in the background.
@@ -318,14 +362,16 @@ impl Dispatcher {
         for attempt in 1..=ATTEMPTS {
             out.attempts = attempt;
             let started = Instant::now();
-            let res = self
+            let mut builder = self
                 .client
                 .post(&req.url)
                 .header("X-Sentinel-Delivery", delivery_id)
                 .header("X-Sentinel-Event", "alert")
-                .json(&req.body)
-                .send()
-                .await;
+                .json(&req.body);
+            if let Some(token) = &req.bearer {
+                builder = builder.bearer_auth(token);
+            }
+            let res = builder.send().await;
             out.latency_ms = Some(started.elapsed().as_millis() as i64);
             match res {
                 Ok(resp) => {
@@ -333,7 +379,15 @@ impl Dispatcher {
                     out.status = Some(status.as_u16());
                     let text = resp.text().await.unwrap_or_default();
                     out.body = serde_json::from_str(&text).ok();
-                    if status.is_success() {
+                    // Slack's Web API answers 200 even when it refuses the message.
+                    if status.is_success() && req.bearer.is_some() && out.body.as_ref().is_some_and(|b| b["ok"] == false) {
+                        let code = out.body.as_ref().and_then(|b| b["error"].as_str()).unwrap_or("unknown_error").to_string();
+                        out.error = Some(format!("Slack: {}", slack_error_hint(&code)));
+                        // Fixing the token, channel or invite takes a person; retrying won't help (rate limits aside).
+                        if code != "ratelimited" {
+                            return out;
+                        }
+                    } else if status.is_success() {
                         out.ok = true;
                         out.error = None;
                         return out;
@@ -361,30 +415,31 @@ impl Dispatcher {
                 if let Some(obj) = body.as_object_mut() {
                     obj.insert("lifecycle".into(), json!(alert.event.as_str()));
                 }
-                vec![Request { url: url.clone(), body }]
+                vec![Request { url: url.clone(), body, bearer: None }]
             }
-            ChannelKind::Slack { url } => vec![Request {
-                url: url.clone(),
-                body: slack_body(alert),
-            }],
-            ChannelKind::Discord { url } => vec![Request {
-                url: url.clone(),
-                body: discord_body(alert),
-            }],
+            ChannelKind::Slack { url } => vec![Request { url: url.clone(), body: slack_body(alert), bearer: None }],
+            ChannelKind::Discord { url } => vec![Request { url: url.clone(), body: discord_body(alert), bearer: None }],
             ChannelKind::Telegram { bot_token, chat_id } => vec![Request {
                 url: format!("{}/bot{bot_token}/sendMessage", self.telegram_api),
                 body: telegram_body(alert, chat_id.trim(), prior),
+                bearer: None,
             }],
+            ChannelKind::SlackBot { bot_token, channel } => {
+                let mut body = slack_body(alert);
+                body["channel"] = json!(channel.trim());
+                // Later events of an incident reply in the thread of its first message.
+                if let Some(ts) = prior {
+                    body["thread_ts"] = json!(ts);
+                }
+                vec![Request { url: format!("{}/chat.postMessage", self.slack_api), body, bearer: Some(bot_token.clone()) }]
+            }
             ChannelKind::Pagerduty { routing_key } => {
                 let dedup = match (alert.event, alert.incident_id) {
                     (AlertEvent::Test, _) => format!("sentinel-test-{delivery_id}"),
                     (_, Some(id)) => format!("sentinel-incident-{id}"),
                     _ => format!("sentinel-rule-{}", alert.rule.id),
                 };
-                let event = |action: &str| Request {
-                    url: self.pagerduty_api.clone(),
-                    body: pagerduty_body(alert, routing_key, &dedup, action),
-                };
+                let event = |action: &str| Request { url: self.pagerduty_api.clone(), body: pagerduty_body(alert, routing_key, &dedup, action), bearer: None };
                 match alert.event {
                     AlertEvent::Resolved => vec![event("resolve")],
                     // A test must not leave an open page behind.
@@ -400,7 +455,20 @@ impl Dispatcher {
 fn message_ref(channel: &Channel, body: &Value) -> Option<String> {
     match channel.kind {
         ChannelKind::Telegram { .. } => body["result"]["message_id"].as_i64().map(|id| id.to_string()),
+        ChannelKind::SlackBot { .. } => body["ts"].as_str().map(str::to_string),
         _ => None,
+    }
+}
+
+/// What a Slack error code means for the person setting it up.
+fn slack_error_hint(code: &str) -> String {
+    match code {
+        "not_in_channel" => "the bot isn't in that channel; run /invite @YourApp there".into(),
+        "channel_not_found" => "channel not found; use #name for a public channel or the channel id".into(),
+        "invalid_auth" | "not_authed" | "token_revoked" | "account_inactive" => "the bot token is invalid or revoked".into(),
+        "missing_scope" => "the app needs the chat:write scope (add chat:write.public to post without an invite)".into(),
+        "is_archived" => "that channel is archived".into(),
+        other => other.to_string(),
     }
 }
 

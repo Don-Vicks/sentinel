@@ -11,24 +11,25 @@ import { ago, clock, short } from '../lib/format';
 import { Empty, ErrorState, PageHeader, Panel, Skeleton, Spinner, Tabs } from '../components/ui';
 import { AgentAccess } from '../components/AgentAccess';
 import { CHANNELS, ChannelEditor, deliversTo, draftProblem, draftToChannel, type ChannelDraft } from '../components/ChannelEditor';
+import { DestinationPicker, DestinationsTab, useDestinations } from '../components/Destinations';
 
 type Template = 'failure_rate' | 'failed_count' | 'tps' | 'avg_compute' | 'max_compute' | 'transfer' | 'transfer_usd' | 'incident' | 'instruction' | 'event' | 'squads' | 'system' | 'health' | 'wallet';
 
-const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number }[] = [
-  { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5 },
-  { id: 'failed_count', label: 'Failed transactions exceed', unit: 'tx', defaultValue: 3 },
-  { id: 'tps', label: 'TPS is above', unit: 'TPS', defaultValue: 50 },
-  { id: 'avg_compute', label: 'Average compute is above', unit: 'CU', defaultValue: 200_000 },
-  { id: 'max_compute', label: 'Any transaction uses more than', unit: 'CU', defaultValue: 1_000_000 },
-  { id: 'transfer_usd', label: 'A single transfer is worth at least (USD)', unit: 'USD', defaultValue: 100_000 },
-  { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000 },
-  { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0 },
-  { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0 },
-  { id: 'event', label: 'The program emits an event', unit: '', defaultValue: 0 },
-  { id: 'squads', label: 'A Squads multisig acts (a vote, an execution)', unit: '', defaultValue: 0 },
-  { id: 'health', label: 'The program\'s health score drops below', unit: '/ 100', defaultValue: 70 },
-  { id: 'wallet', label: 'A wallet\'s SOL balance drops below', unit: 'SOL', defaultValue: 1 },
-  { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0 },
+const TEMPLATES: { id: Template; label: string; unit: string; defaultValue: number; group: string }[] = [
+  { id: 'failure_rate', label: 'Failure rate is above', unit: '%', defaultValue: 5, group: 'Traffic and failures' },
+  { id: 'failed_count', label: 'Failed transactions exceed', unit: 'tx', defaultValue: 3, group: 'Traffic and failures' },
+  { id: 'tps', label: 'TPS is above', unit: 'TPS', defaultValue: 50, group: 'Traffic and failures' },
+  { id: 'avg_compute', label: 'Average compute is above', unit: 'CU', defaultValue: 200_000, group: 'Traffic and failures' },
+  { id: 'max_compute', label: 'Any transaction uses more than', unit: 'CU', defaultValue: 1_000_000, group: 'Traffic and failures' },
+  { id: 'transfer_usd', label: 'A single transfer is worth at least (USD)', unit: 'USD', defaultValue: 100_000, group: 'Money moving' },
+  { id: 'transfer', label: 'A single transfer is at least', unit: '', defaultValue: 100_000, group: 'Money moving' },
+  { id: 'incident', label: 'An incident opens with severity at least', unit: '', defaultValue: 0, group: 'Incidents and health' },
+  { id: 'instruction', label: 'An instruction is called', unit: '', defaultValue: 0, group: 'Program activity' },
+  { id: 'event', label: 'The program emits an event', unit: '', defaultValue: 0, group: 'Program activity' },
+  { id: 'squads', label: 'A Squads multisig acts (a vote, an execution)', unit: '', defaultValue: 0, group: 'Program activity' },
+  { id: 'health', label: 'The program\'s health score drops below', unit: '/ 100', defaultValue: 70, group: 'Incidents and health' },
+  { id: 'wallet', label: 'A wallet\'s SOL balance drops below', unit: 'SOL', defaultValue: 1, group: 'Money moving' },
+  { id: 'system', label: 'Sentinel can\'t see the chain (feed stalled or RPC failing)', unit: '', defaultValue: 0, group: 'Incidents and health' },
 ];
 
 const OPS: { value: FilterOp; label: string }[] = [
@@ -114,6 +115,19 @@ const PRESETS: { label: string; hint: string; template: Template; value: string;
   { label: 'Admin call from a new wallet', hint: 'set_*, update_*, withdraw*, pause, authority changes, from a wallet that has never called them', template: 'instruction', value: '0', severity: 'critical', name: 'Admin instruction from a new wallet' },
 ];
 
+/** A numbered section of the rule form. */
+function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
+  return (
+    <section className="grid gap-3 rounded-xl border border-line p-4" aria-labelledby={`step-${n}`}>
+      <h3 id={`step-${n}`} className="flex items-center gap-2 text-sm font-semibold">
+        <span className="inline-flex size-6 items-center justify-center rounded-full bg-brand/15 text-xs text-brand" aria-hidden>{n}</span>
+        {title}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
 function RuleForm({ onCreated }: { onCreated: () => void }) {
   const { programs: all } = usePrograms();
   const { watching } = useAuth();
@@ -128,6 +142,8 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
   const [severity, setSeverity] = useState<Severity>('high');
   const [createIncident, setCreateIncident] = useState(true);
   const [channels, setChannels] = useState<ChannelDraft[]>([]);
+  const [destinationIds, setDestinationIds] = useState<number[]>([]);
+  const dest = useDestinations();
   const [walletAccount, setWalletAccount] = useState('');
   const [multisig, setMultisig] = useState('');
   const [squadsActions, setSquadsActions] = useState('');
@@ -230,10 +246,12 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         create_incident: template === 'incident' || template === 'system' ? false : createIncident,
         severity,
         channels: channels.map(draftToChannel),
+        destination_ids: destinationIds,
         cooldown_secs: Number(cooldown) || 0,
       });
       setName('');
       setChannels([]);
+      setDestinationIds([]);
       onCreated();
     } catch (err) {
       setError((err as Error).message);
@@ -252,32 +270,28 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
       )}
       <div>
         <p className="label">Quick start</p>
-        <div className="flex flex-wrap gap-2">
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
           {PRESETS.map((p) => (
-            <button key={p.label} type="button" className="btn h-8 text-xs" title={p.hint} onClick={() => applyPreset(p)}>
-              {p.label}
+            <button key={p.label} type="button" className="rounded-lg border border-line bg-sunken/30 p-3 text-left hover:border-ink-3 hover:bg-sunken/60" onClick={() => applyPreset(p)}>
+              <span className="block text-sm font-medium">{p.label}</span>
+              <span className="mt-0.5 block text-xs text-ink-3">{p.hint}</span>
             </button>
           ))}
         </div>
       </div>
-      <div className="grid gap-3 md:grid-cols-2">
-        <div>
-          <label className="label" htmlFor="rule-name">Name</label>
-          <input id="rule-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Page on failure spikes" autoComplete="off" />
-        </div>
-        <div>
-          <label className="label" htmlFor="rule-program">Program</label>
-          <select id="rule-program" className="input" value={program} onChange={(e) => setProgram(e.target.value)}>
-            <option value="">All programs I watch ({programs.length})</option>
-            {programs.map((p) => <option key={p.program_id} value={p.program_id}>{p.label}</option>)}
-          </select>
-        </div>
+
+      <Step n={1} title="What should trigger it?">
+      <div>
+        <label className="label" htmlFor="rule-program">Program</label>
+        <select id="rule-program" className="input" value={program} onChange={(e) => setProgram(e.target.value)}>
+          <option value="">All programs I watch ({programs.length})</option>
+          {programs.map((p) => <option key={p.program_id} value={p.program_id}>{p.label}</option>)}
+        </select>
       </div>
 
-      <fieldset className="grid gap-3 md:grid-cols-[2fr_1fr_1fr] md:items-end">
-        <legend className="label">When</legend>
-        <div>
-          <label className="sr-only" htmlFor="rule-template">Condition</label>
+      <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr] md:items-end">
+        <div className="md:col-span-3">
+          <label className="label" htmlFor="rule-template">Trigger</label>
           <select
             id="rule-template"
             className="input"
@@ -288,7 +302,11 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
               setValue(String(t.defaultValue));
             }}
           >
-            {TEMPLATES.map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+            {[...new Set(TEMPLATES.map((t) => t.group))].map((g) => (
+              <optgroup key={g} label={g}>
+                {TEMPLATES.filter((t) => t.group === g).map((t) => <option key={t.id} value={t.id}>{t.label}</option>)}
+              </optgroup>
+            ))}
           </select>
         </div>
         {template === 'wallet' && (
@@ -350,7 +368,7 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
             )}
           </>
         )}
-      </fieldset>
+      </div>
 
       {template === 'squads' && (
         <div className="grid gap-3 rounded-md border border-line p-3 md:grid-cols-[2fr_2fr_1fr]">
@@ -443,32 +461,38 @@ function RuleForm({ onCreated }: { onCreated: () => void }) {
         </div>
       )}
 
-      <fieldset className="grid gap-3 md:grid-cols-[2fr_1fr_1fr] md:items-end">
-        <legend className="label">Then</legend>
-        <div className="md:col-span-1">
-          <p className="label">Notify</p>
-          <p className="text-xs text-ink-3">Slack, Telegram, PagerDuty, Discord or a webhook. Alerts follow the incident: a message when it opens, replies when it escalates and when it resolves.</p>
+      </Step>
+
+      <Step n={2} title="Who should hear about it?">
+        <p className="text-xs text-ink-3 -mt-1">Alerts follow the incident: a message when it opens, replies when it escalates and when it resolves. Without a destination the rule only opens incidents on the dashboard.</p>
+        <DestinationPicker destinations={dest.data ?? []} selected={destinationIds} onChange={setDestinationIds} />
+        <ChannelEditor value={channels} onChange={setChannels} onSave={dest.save} emptyHint={dest.data?.length ? 'Or set up a new one for just this rule.' : 'No destination yet. Add one below, send a test, and save it to reuse in other rules.'} />
+      </Step>
+
+      <Step n={3} title="Name it and set how serious it is">
+        <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr]">
+          <div>
+            <label className="label" htmlFor="rule-name">Name</label>
+            <input id="rule-name" className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Page on failure spikes" autoComplete="off" />
+          </div>
+          <div>
+            <label className="label" htmlFor="rule-severity">Severity</label>
+            <select id="rule-severity" className="input" value={severity} onChange={(e) => setSeverity(e.target.value as Severity)}>
+              {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="rule-cooldown">Cooldown (s)</label>
+            <input id="rule-cooldown" className="input num" type="number" min="0" value={cooldown} onChange={(e) => setCooldown(e.target.value)} />
+          </div>
         </div>
-        <div>
-          <label className="label" htmlFor="rule-severity">Severity</label>
-          <select id="rule-severity" className="input" value={severity} onChange={(e) => setSeverity(e.target.value as Severity)}>
-            {(['info', 'low', 'medium', 'high', 'critical'] as const).map((s) => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div>
-          <label className="label" htmlFor="rule-cooldown">Cooldown (s)</label>
-          <input id="rule-cooldown" className="input num" type="number" min="0" value={cooldown} onChange={(e) => setCooldown(e.target.value)} />
-        </div>
-        <div className="md:col-span-3">
-          <ChannelEditor value={channels} onChange={setChannels} />
-        </div>
-        {template !== "incident" && template !== "system" && (
-          <label className="flex items-center gap-2 text-sm text-ink-2 md:col-span-3">
+        {template !== 'incident' && template !== 'system' && (
+          <label className="flex items-center gap-2 text-sm text-ink-2">
             <input type="checkbox" checked={createIncident} onChange={(e) => setCreateIncident(e.target.checked)} />
             Open an incident with the matching transactions
           </label>
         )}
-      </fieldset>
+      </Step>
 
       {error && <p className="text-sm text-crit" role="alert">{error}</p>}
       <div>
@@ -500,8 +524,8 @@ function AlertsBody() {
   const { programs } = usePrograms();
   const [testing, setTesting] = useState<number | null>(null);
   const [params, setParams] = useSearchParams();
-  const tab = (['rules', 'deliveries', 'agents'] as const).find((t) => t === params.get('tab')) ?? 'rules';
-  const setTab = (t: 'rules' | 'deliveries' | 'agents') => setParams(t === 'rules' ? {} : { tab: t }, { replace: true });
+  const tab = (['rules', 'destinations', 'deliveries', 'agents'] as const).find((t) => t === params.get('tab')) ?? 'rules';
+  const setTab = (t: 'rules' | 'destinations' | 'deliveries' | 'agents') => setParams(t === 'rules' ? {} : { tab: t }, { replace: true });
   const failed = (executions.data ?? []).filter((x) => !x.delivered).length;
   const label = (id: string | null) => (id ? programs.find((p) => p.program_id === id)?.label ?? short(id) : 'All programs');
 
@@ -539,6 +563,7 @@ function AlertsBody() {
         onChange={setTab}
         tabs={[
           { value: 'rules', label: 'Rules' },
+          { value: 'destinations', label: 'Destinations' },
           { value: 'deliveries', label: 'Deliveries', badge: failed || undefined, tone: 'crit' },
           { value: 'agents', label: 'Agent access' },
         ]}
@@ -604,6 +629,8 @@ function AlertsBody() {
 
       </div>
       )}
+
+      {tab === 'destinations' && <DestinationsTab />}
 
       {tab === 'agents' && <AgentAccess />}
 

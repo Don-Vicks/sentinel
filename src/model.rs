@@ -425,6 +425,9 @@ pub enum ChannelKind {
     Telegram { bot_token: String, chat_id: String },
     /// PagerDuty Events API v2: triggers and resolves by incident.
     Pagerduty { routing_key: String },
+    /// Slack app bot token (`xoxb-…`): posts to a channel and keeps an
+    /// incident's updates in one thread, which an incoming webhook can't do.
+    SlackBot { bot_token: String, channel: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -434,6 +437,23 @@ pub struct Channel {
     /// Only alerts at or above this severity go to this channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_severity: Option<Severity>,
+}
+
+/// A named channel an account saved once and reuses across rules.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Destination {
+    pub id: i64,
+    pub owner: String,
+    pub name: String,
+    #[serde(flatten)]
+    pub channel: Channel,
+    pub created_at: DateTime<Utc>,
+}
+
+impl Destination {
+    pub fn masked(&self) -> Self {
+        Self { channel: self.channel.masked(), ..self.clone() }
+    }
 }
 
 /// Prefix of a masked secret returned by the API. A masked value sent back on
@@ -474,6 +494,7 @@ impl Channel {
             ChannelKind::Discord { .. } => "discord",
             ChannelKind::Telegram { .. } => "telegram",
             ChannelKind::Pagerduty { .. } => "pagerduty",
+            ChannelKind::SlackBot { .. } => "slack_bot",
         }
     }
 
@@ -483,6 +504,7 @@ impl Channel {
             ChannelKind::Webhook { url } | ChannelKind::Slack { url } | ChannelKind::Discord { url } => mask_url(url),
             ChannelKind::Telegram { chat_id, .. } => format!("telegram chat {chat_id}"),
             ChannelKind::Pagerduty { .. } => "pagerduty".into(),
+            ChannelKind::SlackBot { channel, .. } => format!("slack {channel}"),
         }
     }
 
@@ -491,6 +513,7 @@ impl Channel {
             ChannelKind::Webhook { url } | ChannelKind::Slack { url } | ChannelKind::Discord { url } => url.contains(MASK),
             ChannelKind::Telegram { bot_token, .. } => bot_token.starts_with(MASK),
             ChannelKind::Pagerduty { routing_key } => routing_key.starts_with(MASK),
+            ChannelKind::SlackBot { bot_token, .. } => bot_token.starts_with(MASK),
         }
     }
 
@@ -504,6 +527,10 @@ impl Channel {
                 chat_id: chat_id.clone(),
             },
             ChannelKind::Pagerduty { routing_key } => ChannelKind::Pagerduty { routing_key: mask(routing_key) },
+            ChannelKind::SlackBot { bot_token, channel } => ChannelKind::SlackBot {
+                bot_token: mask(bot_token),
+                channel: channel.clone(),
+            },
         };
         Self { kind, min_severity: self.min_severity }
     }
@@ -519,6 +546,7 @@ impl Channel {
             | (ChannelKind::Discord { url }, ChannelKind::Discord { url: o }) => *url = o.clone(),
             (ChannelKind::Telegram { bot_token, .. }, ChannelKind::Telegram { bot_token: o, .. }) => *bot_token = o.clone(),
             (ChannelKind::Pagerduty { routing_key }, ChannelKind::Pagerduty { routing_key: o }) => *routing_key = o.clone(),
+            (ChannelKind::SlackBot { bot_token, .. }, ChannelKind::SlackBot { bot_token: o, .. }) => *bot_token = o.clone(),
             _ => return false,
         }
         true

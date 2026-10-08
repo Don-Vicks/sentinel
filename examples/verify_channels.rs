@@ -3,6 +3,7 @@
 //! own credentials; nothing is stored anywhere but a throwaway database.
 //!
 //!     SLACK_WEBHOOK_URL=https://hooks.slack.com/services/…  \
+//!     SLACK_BOT_TOKEN=xoxb-… SLACK_CHANNEL=#alerts  \
 //!     TELEGRAM_BOT_TOKEN=123:ABC TELEGRAM_CHAT_ID=-100…      \
 //!     PAGERDUTY_ROUTING_KEY=…  DISCORD_WEBHOOK_URL=…  WEBHOOK_URL=…  \
 //!     cargo run --example verify_channels
@@ -41,6 +42,9 @@ async fn main() -> anyhow::Result<()> {
     let mut add = |kind| channels.push(Channel { kind, min_severity: None });
     if let Some(url) = env("SLACK_WEBHOOK_URL") {
         add(ChannelKind::Slack { url });
+    }
+    if let (Some(bot_token), Some(channel)) = (env("SLACK_BOT_TOKEN"), env("SLACK_CHANNEL")) {
+        add(ChannelKind::SlackBot { bot_token, channel });
     }
     if let (Some(bot_token), Some(chat_id)) = (env("TELEGRAM_BOT_TOKEN"), env("TELEGRAM_CHAT_ID")) {
         add(ChannelKind::Telegram { bot_token, chat_id });
@@ -88,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
             let label = match c.kind {
                 ChannelKind::Pagerduty { .. } => "pagerduty",
                 ChannelKind::Slack { .. } => "slack",
+                ChannelKind::SlackBot { .. } => "slack app",
                 ChannelKind::Telegram { .. } => "telegram",
                 ChannelKind::Discord { .. } => "discord",
                 ChannelKind::Webhook { .. } => "webhook",

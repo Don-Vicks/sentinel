@@ -84,6 +84,10 @@ pub fn router(sentinel: AppState) -> Router {
         .route("/api/rules", get(list_rules).post(create_rule))
         .route("/api/rules/{id}", axum::routing::patch(update_rule).delete(delete_rule))
         .route("/api/rules/{id}/test", post(test_rule))
+        .route("/api/destinations", get(list_destinations).post(create_destination))
+        .route("/api/destinations/{id}", axum::routing::delete(delete_destination))
+        .route("/api/destinations/{id}/test", post(test_saved_destination))
+        .route("/api/channels/test", post(test_channel_draft))
         .route("/api/alerts", get(list_alerts))
         .route("/api/stream", get(stream))
         .route("/metrics", get(metrics))
@@ -835,6 +839,9 @@ pub(crate) struct RuleInput {
     webhook_url: Option<String>,
     #[serde(default)]
     channels: Vec<Channel>,
+    /// Saved destinations to add to the rule's channels (copied when the rule is saved).
+    #[serde(default)]
+    destination_ids: Vec<i64>,
     #[serde(default = "yes")]
     enabled: bool,
     #[serde(default = "default_cooldown")]
@@ -885,6 +892,24 @@ async fn validate(s: &Sentinel, account: &str, input: &RuleInput) -> Result<(), 
 }
 
 const MAX_CHANNELS: usize = 5;
+const MAX_DESTINATIONS: usize = 20;
+
+/// Appends the channels of the rule's saved destinations. They arrive unmasked, so
+/// `restore_channels` has nothing to fill in.
+fn expand_destinations(s: &Sentinel, account: &str, input: &mut RuleInput) -> Result<(), ApiError> {
+    if input.destination_ids.is_empty() {
+        return Ok(());
+    }
+    let saved = s.store.destinations_for(account)?;
+    // Masked channels sent by the editor keep their slot, so new ones go after them.
+    for id in std::mem::take(&mut input.destination_ids) {
+        let d = saved.iter().find(|d| d.id == id).ok_or_else(|| not_found("destination"))?;
+        if !input.channels.contains(&d.channel) {
+            input.channels.push(d.channel.clone());
+        }
+    }
+    Ok(())
+}
 
 /// Channels from a request, with masked secrets filled in from the rule they replace.
 fn resolve_channels(input: &RuleInput, existing: Option<&AlertRule>) -> Result<Vec<Channel>, ApiError> {
@@ -931,6 +956,8 @@ pub(crate) async fn create_rule_inner(s: &Sentinel, account: String, input: Rule
     if !s.limits.is_admin(&account) && owned >= s.limits.max_rules {
         return Err(forbidden(&format!("You have the maximum of {} rules. Delete one first.", s.limits.max_rules)));
     }
+    let mut input = input;
+    expand_destinations(s, &account, &mut input)?;
     validate(s, &account, &input).await?;
     let channels = resolve_channels(&input, None)?;
     let webhook_url = resolve_webhook(&input, None);
@@ -960,6 +987,8 @@ async fn update_rule(
     Json(input): Json<RuleInput>,
 ) -> ApiResult<Value> {
     let existing = owned_rule(&s, &account, id)?;
+    let mut input = input;
+    expand_destinations(&s, &account, &mut input)?;
     validate(&s, &account, &input).await?;
     let channels = resolve_channels(&input, Some(&existing))?;
     let webhook_url = resolve_webhook(&input, Some(&existing));
@@ -1200,4 +1229,73 @@ async fn stream(
     });
     let stream = futures_util::stream::iter(hello.map(Ok)).chain(events);
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+// ------------------------------------------------------------ destinations
+
+#[derive(Deserialize)]
+struct DestinationInput {
+    name: String,
+    #[serde(flatten)]
+    channel: Channel,
+}
+
+async fn list_destinations(State(s): State<AppState>, Account(account): Account) -> ApiResult<Value> {
+    let mine: Vec<_> = s.store.destinations_for(&account)?.iter().map(|d| d.masked()).collect();
+    Ok(Json(json!(mine)))
+}
+
+async fn create_destination(State(s): State<AppState>, Account(account): Account, Json(input): Json<DestinationInput>) -> ApiResult<Value> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Name this destination, like \"#alerts on Slack\"".into()));
+    }
+    if input.channel.is_masked() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Enter the secret again".into()));
+    }
+    if !s.limits.is_admin(&account) && s.store.destinations_for(&account)?.len() >= MAX_DESTINATIONS {
+        return Err(forbidden(&format!("You have the maximum of {MAX_DESTINATIONS} saved destinations. Delete one first.")));
+    }
+    check_channel(&input.channel, s.allow_private_webhooks())
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{}: {e}", input.channel.label())))?;
+    let mut channel = input.channel;
+    // A destination is a place; severity filters belong to the rule that uses it.
+    channel.min_severity = None;
+    let d = s.store.create_destination(crate::model::Destination { id: 0, owner: account, name: name.to_string(), channel, created_at: Utc::now() })?;
+    Ok(Json(json!(d.masked())))
+}
+
+async fn delete_destination(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    if !s.store.delete_destination(&account, id)? {
+        return Err(not_found("destination"));
+    }
+    Ok(Json(json!({ "deleted": true })))
+}
+
+/// What a test delivery did, for the dashboard to show next to the form.
+fn test_result(exec: crate::model::AlertExecution) -> Value {
+    json!({ "delivered": exec.delivered, "status_code": exec.status_code, "error": exec.error, "latency_ms": exec.latency_ms })
+}
+
+async fn test_saved_destination(State(s): State<AppState>, Account(account): Account, Path(id): Path<i64>) -> ApiResult<Value> {
+    let d = s.store.destinations_for(&account)?.into_iter().find(|d| d.id == id).ok_or_else(|| not_found("destination"))?;
+    Ok(Json(test_result(s.test_channel(&d.channel, &d.name).await)))
+}
+
+#[derive(Deserialize)]
+struct ChannelTest {
+    #[serde(flatten)]
+    channel: Channel,
+}
+
+/// Tests a channel that isn't saved yet, straight from the form.
+async fn test_channel_draft(State(s): State<AppState>, Account(_account): Account, Json(input): Json<ChannelTest>) -> ApiResult<Value> {
+    if input.channel.is_masked() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "Enter the secret again to test it".into()));
+    }
+    check_channel(&input.channel, s.allow_private_webhooks())
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("{}: {e}", input.channel.label())))?;
+    Ok(Json(test_result(s.test_channel(&input.channel, "Channel test").await)))
 }

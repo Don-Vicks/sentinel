@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS rules (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     data TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS destinations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner TEXT NOT NULL,
+    data TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
     token_hash TEXT PRIMARY KEY,
     account TEXT NOT NULL,
@@ -528,6 +533,27 @@ impl Store {
             params![serde_json::to_string(&rule)?, rule.id],
         )?;
         Ok(rule)
+    }
+
+    // --- destinations ---
+
+    pub fn create_destination(&self, mut d: crate::model::Destination) -> Result<crate::model::Destination> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("INSERT INTO destinations(owner, data) VALUES (?1, '{}')", [&d.owner])?;
+        d.id = conn.last_insert_rowid();
+        conn.execute("UPDATE destinations SET data = ?1 WHERE id = ?2", params![serde_json::to_string(&d)?, d.id])?;
+        Ok(d)
+    }
+
+    pub fn destinations_for(&self, owner: &str) -> Result<Vec<crate::model::Destination>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT data FROM destinations WHERE owner = ?1 ORDER BY id")?;
+        let rows = stmt.query_map([owner], |r| parse(r.get(0)?))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn delete_destination(&self, owner: &str, id: i64) -> Result<bool> {
+        Ok(self.conn.lock().unwrap().execute("DELETE FROM destinations WHERE id = ?1 AND owner = ?2", params![id, owner])? > 0)
     }
 
     pub fn update_rule(&self, rule: &AlertRule) -> Result<()> {
