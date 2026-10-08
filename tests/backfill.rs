@@ -2,7 +2,6 @@
 
 use chrono::Utc;
 use sentinel::engine::Sentinel;
-use sentinel::model::*;
 use sentinel::source::VortexSource;
 use sentinel::store::Store;
 use axum::{extract::State, routing::post, Json, Router};

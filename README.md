@@ -338,6 +338,12 @@ cargo test
 
 `tests/summaries.rs` replays three hours of traffic, checks the exact totals in the summary, and checks the scheduler sends each period once, skips a slot missed by more than six hours, and waits for the next slot after a schedule is created. `tests/mcp.rs` drives the MCP server over HTTP: tokens and scopes, every kind of tool, resources, prompts, ownership between accounts, and revocation.
 
+`tests/instruction_rules.rs` matches calls by name, decoded argument and named account against Pump.fun's real on-chain IDL and a real mainnet Buy, checks that a failed call or a missing IDL changes the outcome as documented, and that a first-time signer is flagged once and remembered in the database. `tests/backfill.rs` serves real transactions from a mock RPC and checks that history arms the detectors at once, raises nothing, seeds the summaries and is not counted twice. `tests/system_alerts.rs` freezes the chain tip and checks one announcement and one recovery, for only the rules that asked.
+
+`tests/squads.rs` runs an upgrade executed through a Squads `vault_transaction_execute` CPI and checks the multisig, the signing member, and the threshold read back from a mock account. `tests/dependencies.rs` checks that called programs are tracked (and the token program is not), that their code accounts are added to the stream, that an upgrade of one opens an incident without being counted as traffic, and that a later failure spike blames it. `tests/concentration.rs` checks a new dominant wallet is flagged and one that was always dominant is not.
+
+`tests/mute.rs` checks a maintenance window holds notifications and logs them as held, still records the incident, holds the resolution of an incident nobody heard begin, and announces the next one after unmuting. `tests/telegram_bot.rs` drives the bot against a mock Telegram API: strangers get no answer, each command answers only for the owner's programs, and the Acknowledge button works from the right chat only. `tests/health_rules.rs` covers health-score and wallet-balance rules and the health history. `tests/metrics.rs` checks the Prometheus output, the optional scrape token, the public status page and the badge.
+
 `tests/pipeline.rs` drives the real engine through a full cycle:
 - healthy baseline
 - failure spike → incident with linked transactions and fingerprints

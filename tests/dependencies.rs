@@ -10,7 +10,7 @@ use sentinel::store::Store;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use vortex::events::logs::Invocation;
-use vortex::events::{AccountRef, Instruction, TxError, VortexTransaction};
+use vortex::events::{AccountRef, TxError, VortexTransaction};
 use vortex::hub::HubStats;
 
 const PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";

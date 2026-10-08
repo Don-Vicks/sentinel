@@ -35,7 +35,11 @@ When a Solana program starts failing on mainnet, teams find out from users, then
 - **Program upgrades and authority changes,** read from the upgradeable loader (including multisig executions via CPI), with a card showing who can upgrade the program. An incident that starts soon after an upgrade says so.
 - **Vault drain detection** on treasury accounts the team names.
 - **Health check and daily summaries:** a 0-100 score whose every check shows its rule and numbers, and a daily or weekly report of what the program did (transactions, wallets, value moved, errors, incidents, changes) on the dashboard or in a chat channel.
-- **An MCP server,** so an agent can read health, diagnose incidents, pull a post-mortem and set up alerts. See [docs/MCP.md](docs/MCP.md).
+- **Alerts on what an instruction was asked to do,** using the program's on-chain IDL: by name, decoded arguments, named accounts or signer, including "first time this wallet has called it".
+- **Dependencies and Squads:** Sentinel learns which programs yours calls, watches them for upgrades, and blames a recent one when trouble starts. Multisig upgrades name the multisig, the member who signed and the signatures required.
+- **Telegram that answers back:** an Acknowledge button on every incident and commands for status, health, summaries and maintenance windows.
+- **Warm start, a public status page and badge, Prometheus metrics, and one-step "protect this program".**
+- **An MCP server,** so an agent can read health, diagnose incidents, pull a post-mortem and set up alerts. See [docs/MCP.md](docs/MCP.md) and the two agent skills in `docs/skills/`.
 
 ## Built on my own Vortex library
 
