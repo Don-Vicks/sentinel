@@ -44,7 +44,7 @@ cargo build --release --bin sentinel --quiet
 
 # ---- 4. run ------------------------------------------------------------------------------
 say "3/3  Starting on the 15-program showcase set"
-export SENTINEL_PROGRAMS="$(tr -d '[:space:]' < docs/showcase.txt)"
+export SENTINEL_PROGRAMS="$(tr -d '[:space:]' < scripts/showcase.txt)"
 export SENTINEL_MAX_WATCHED="${SENTINEL_MAX_WATCHED:-40}"
 export SENTINEL_PUBLIC_URL="${SENTINEL_PUBLIC_URL:-$URL}"
 export SENTINEL_DB="$DB"
