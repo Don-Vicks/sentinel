@@ -4,7 +4,7 @@
 
 It runs on [Solami](https://solami.dev) live data (Yellowstone gRPC, RPC, Blur, Beam, Mirage) and on [Vortex](https://github.com/Don-Vicks/vortex), my own open-source Rust library for streaming and decoding Solana transactions.
 
-[The story](docs/STORY.md) · [Real incidents it caught](docs/EVIDENCE.md) · [Features](docs/FEATURES.md) · [Alert channels](docs/CHANNELS.md) · [Agent access (MCP)](docs/MCP.md) · [Configuration](docs/CONFIGURATION.md) · [API](docs/API.md)
+**[Watch the demo (2:56)](https://youtu.be/tk01rqkEyKs)** · [The story](docs/STORY.md) · [Real incidents it caught](docs/EVIDENCE.md) · [Features](docs/FEATURES.md) · [Alert channels](docs/CHANNELS.md) · [Agent access (MCP)](docs/MCP.md) · [Configuration](docs/CONFIGURATION.md) · [API](docs/API.md)
 
 ![The overview: fifteen programs, live health, and the Solami data path](docs/images/overview.png)
 
