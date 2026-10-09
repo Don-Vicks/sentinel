@@ -10,7 +10,10 @@ Fill in the link marked TODO (the demo video) once it is uploaded. Paste each se
 - Repo: https://github.com/Don-Vicks/sentinel
 - Vortex (the streaming and decoding layer it runs on): https://github.com/Don-Vicks/vortex
 - Demo video: TODO
-- Live instance: https://sentinel-production-b1d2.up.railway.app (watching a set of programs on mainnet; sign in with any Solana wallet to keep your own watchlist and alerts)
+- Run it: `cp .env.example .env` (add your Solami key), then `docker compose up --build` (README, "Run it")
+- Real incidents caught on live mainnet, with on-chain proof to check: docs/EVIDENCE.md
+- Alert channel setup (Slack app, Telegram, PagerDuty, Discord, webhook): docs/CHANNELS.md
+- Agent access over MCP: docs/MCP.md
 
 ## Description
 

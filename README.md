@@ -66,7 +66,7 @@ flowchart TD
 
 Failure rates and volume say how a program is behaving. These say what is being done *to* it, and tell the right people:
 
-- **Alerts follow the incident, in Slack, Telegram, PagerDuty, Discord or a webhook.** A rule can notify several channels, each with its own minimum severity (page on critical, chat on medium). The first message says what broke: the top failing `program::instruction → error`, wallets affected, how fast it was detected. An escalation and the resolution reply to that message in Telegram, and PagerDuty triggers and resolves one alert per incident, so nobody is paged twice and nothing is left open. Bot tokens and routing keys are stored server-side, masked in the API and scrubbed from error text.
+- **Alerts follow the incident, in Slack, Telegram, PagerDuty, Discord or a webhook.** A rule can notify several channels, each with its own minimum severity (page on critical, chat on medium). The first message says what broke: the top failing `program::instruction → error`, wallets affected, how fast it was detected. An escalation and the resolution reply to that message in Telegram, and PagerDuty triggers and resolves one alert per incident, so nobody is paged twice and nothing is left open. Bot tokens and routing keys are stored server-side, masked in the API and scrubbed from error text. **Step-by-step setup for each channel, with troubleshooting: [docs/CHANNELS.md](docs/CHANNELS.md).**
 - **Program upgrades and authority changes.** Sentinel reads the upgradeable loader's instructions, including ones a multisig executes through CPI, and opens an incident when a watched program is upgraded, its upgrade authority moves, it is made immutable or it is closed. The program page shows who can upgrade it now: a single wallet (flagged), a program-controlled authority such as a multisig, or nobody.
 - **Deploy correlation.** An incident that starts within 30 minutes of an upgrade carries it as evidence: "this began 74s after the program was upgraded", in the explanation, the alert and the post-mortem.
 - **Vault drains.** Name a program's treasury or vault accounts (Sentinel suggests likely ones from traffic) and it opens an incident when one loses a set share of its balance, or a set dollar amount, within ten minutes. Deposits offset withdrawals, so ordinary churn is not an incident.
@@ -107,6 +107,9 @@ Vortex is not a third-party dependency. It is [my own open-source Rust project](
 **Third-party pieces,** all standard: the Solana SDK, the Yellowstone protocol definitions (`yellowstone-grpc-proto`), Tokio, Axum, SQLite and React. The data comes from Solami.
 
 ## Numbers
+
+Real incidents Sentinel caught on live mainnet, with the on-chain facts to check them against, are in [docs/EVIDENCE.md](docs/EVIDENCE.md): an upstream program redeployed under seven watched programs, and a critical failure spike on Meteora DBC.
+
 
 Measured with `cargo run --release --example bench` on real mainnet Pump.fun transactions, one core, Apple M-series laptop:
 
@@ -212,7 +215,7 @@ Open http://localhost:8080. Pump.fun is monitored out of the box; add any progra
 | `SENTINEL_MCP_PER_MIN` / `SENTINEL_MCP_WRITES_PER_MIN` | `120` / `20` | Per-token limits on MCP calls, and on the ones that change things |
 | `SENTINEL_METRICS_TOKEN` | — | If set, `/metrics` requires `Authorization: Bearer <token>` |
 | `SENTINEL_CLUSTER` | `mainnet` | `devnet` or `testnet`: explorer links follow it and the dashboard shows a badge. What is streamed is decided by the endpoints you configure |
-| `SENTINEL_TELEGRAM_API` / `SENTINEL_PAGERDUTY_API` | official endpoints | Override where Telegram and PagerDuty deliveries go (tests and mocks) |
+| `SENTINEL_TELEGRAM_API` / `SENTINEL_SLACK_API` / `SENTINEL_PAGERDUTY_API` | official endpoints | Override where Telegram, Slack (app) and PagerDuty deliveries go (tests and mocks) |
 | `SENTINEL_ALLOW_PRIVATE_WEBHOOKS` | — | `1` allows webhooks to private and loopback addresses (local dev only; blocked by default) |
 | `SENTINEL_SIMULATE` | — | **Dev only.** Program ID to feed with synthetic traffic instead of gRPC |
 
@@ -308,7 +311,7 @@ The transactions travel Solami gRPC → Vortex decoder → Sentinel rule. An inc
 
 🔒 requires a session (wallet sign-in). Changing an incident's status requires watching its program. Changing a program's detection settings is operator-only (`SENTINEL_ADMINS`), since everyone watching it shares them.
 
-A rule's `channels` is a list of objects, each with a `type` and an optional `min_severity`:
+Setup instructions for each service (creating the Slack app or the Telegram bot, finding the chat id, getting a PagerDuty key) are in [docs/CHANNELS.md](docs/CHANNELS.md). A rule's `channels` is a list of objects, each with a `type` and an optional `min_severity`:
 
 ```json
 { "type": "slack_bot", "bot_token": "xoxb-...", "channel": "#alerts" }
