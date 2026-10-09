@@ -153,7 +153,7 @@ cargo test
 
 ## Limits
 
-Timestamps are Sentinel's receive time at `Processed` commitment. Argument and event decoding need a program's Anchor IDL. USD values use Blur's last price, and thinly traded tokens never trigger alerts. Delivery to Slack, Telegram and PagerDuty is tested against mock servers and the real services' error responses; check your own credentials with **Send test**. The full list: [docs/LIMITS.md](docs/LIMITS.md).
+Timestamps are Sentinel's receive time at `Processed` commitment. Argument and event decoding need a program's Anchor IDL. USD values use Blur's last price, and thinly traded tokens never trigger alerts. Telegram is verified end to end on a real bot; Slack, PagerDuty and Discord are tested against mock servers and the real services' error responses, so check your own credentials with **Send test**. The full list: [docs/LIMITS.md](docs/LIMITS.md).
 
 ## Documentation
 
