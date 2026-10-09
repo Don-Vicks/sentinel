@@ -126,7 +126,7 @@ Every other setting, hosting notes (Docker, Railway) and the full environment ta
 | **Discord** | Community or team channels | [Discord](docs/CHANNELS.md#discord) |
 | **Webhook** | Your own tooling. JSON with an idempotency header | [Webhook](docs/CHANNELS.md#webhook) |
 
-Each channel has a **Send test** button. Save a channel once as a destination and reuse it in any rule. Full guide with troubleshooting: [docs/CHANNELS.md](docs/CHANNELS.md).
+Telegram on a real bot, end to end (alert, one-tap Acknowledge, `/status`): [watch the 35-second clip](https://youtu.be/SWyeZFxL5_g). Each channel has a **Send test** button. Save a channel once as a destination and reuse it in any rule. Full guide with troubleshooting: [docs/CHANNELS.md](docs/CHANNELS.md).
 
 ## Agent access (MCP)
 

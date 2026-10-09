@@ -104,6 +104,8 @@ Telegram works in both directions: Sentinel sends alerts, and the chat can ask q
 | `/ack <id>` | Mark an incident as being investigated |
 | `/resolve <id>` | Mark it resolved |
 
+Here it is working on a real bot: [35-second clip](https://youtu.be/SWyeZFxL5_g).
+
 A chat that no rule sends to is ignored, so a stranger who finds the bot cannot read your programs. If the bot is in a group, it answers commands there.
 
 ## PagerDuty
